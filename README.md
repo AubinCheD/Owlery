@@ -45,21 +45,24 @@ clic : ouvrir la PR, le dépôt dans DragonTree, ou une session Claude dans Fawk
 - Reçoit ses demandes par le contrat local commun aux applications (canal nommé réservé au compte).
 - Comptes des forges partagés avec DragonTree (mêmes identifiants dans le coffre de Windows).
 
-## Lancer
+## Compilation et lancement
+
+Windows, Rust stable (édition 2024).
+
+Avec la toolchain `x86_64-pc-windows-gnu`, préparer une fois le clone :
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\setup.ps1
+```
+
+Ce script copie `llvm-ar` de rustup (composant `llvm-tools`, ajouté s'il manque) en
+`tools\dlltool.exe` et écrit `.cargo\config.toml` (éditeur de liens `rust-lld`). Ces deux fichiers
+sont **propres au poste** (chemins absolus) et **ignorés par git** : les recréer avec le script sur
+chaque poste, `-Force` pour réécrire la configuration. Avec la toolchain MSVC (Build Tools C++
+installés), il n'y a rien à préparer.
 
 ```
 cargo run --release
-```
-
-Toolchain MSVC : rien à préparer. Toolchain GNU (`stable-x86_64-pc-windows-gnu`) : il faut un
-`dlltool` complet ; le plus simple est de réutiliser celui préparé par DragonTree
-(`scripts\setup-toolchain.ps1` du dépôt DragonTree) et d'écrire un `.cargo/config.toml` local qui y
-pointe (fichier ignoré par git, car il contient des chemins de la machine) :
-
-```toml
-[target.x86_64-pc-windows-gnu]
-rustflags = ["-C", "dlltool=<DragonTree>/.tools/mingw64/bin/dlltool.exe",
-             "-L", "native=<DragonTree>/.tools/mingw64/lib"]
 ```
 
 Tests : `cargo test`.

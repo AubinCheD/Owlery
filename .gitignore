@@ -4,3 +4,5 @@
 *.local.md
 # Espace de travail des skills superpowers (exécution des plans).
 /.superpowers/
+# Outils de compilation copiés par scripts/setup.ps1 (propres au poste).
+/tools/
