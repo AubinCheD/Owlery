@@ -1,2 +1,4 @@
-/target
+/target/
+# Généré localement (chemins propres à la machine) : voir README.
+/.cargo/config.toml
 *.local.md
