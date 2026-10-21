@@ -32,11 +32,22 @@ pub struct Settings {
     pub theme: ThemeChoice,
     /// Raccourcis réglés par l'utilisateur : identifiant de commande → combinaisons (`"Ctrl+R"`).
     pub shortcuts: BTreeMap<String, Vec<String>>,
+    /// Dossier local de chaque dépôt (`propriétaire/nom` → dossier), pour DragonTree et Claude.
+    pub repo_dirs: BTreeMap<String, String>,
+    /// Chemin de `dragontree.exe` (vide : cherché dans le PATH).
+    pub dragontree_exe: String,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { refresh_minutes: 5, group_by: GroupBy::Repo, theme: ThemeChoice::System, shortcuts: BTreeMap::new() }
+        Settings {
+            refresh_minutes: 5,
+            group_by: GroupBy::Repo,
+            theme: ThemeChoice::System,
+            shortcuts: BTreeMap::new(),
+            repo_dirs: BTreeMap::new(),
+            dragontree_exe: String::new(),
+        }
     }
 }
 
@@ -79,7 +90,9 @@ pub fn load(dir: &Path) -> Loaded {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Loaded { state: AppState::default(), problems },
         Err(e) => {
-            problems.push(format!("Lecture de l'état impossible ({e}) : démarrage avec un état vide, le fichier est laissé en place."));
+            problems.push(format!(
+                "Lecture de l'état impossible ({e}) : démarrage avec un état vide, le fichier est laissé en place."
+            ));
             return Loaded { state: AppState::default(), problems };
         }
     };
@@ -87,7 +100,10 @@ pub fn load(dir: &Path) -> Loaded {
         Ok(st) => st,
         Err(e) => {
             let aside = set_aside(&path, "illisible");
-            problems.push(format!("État illisible ({e}) : mis de côté dans {}, démarrage avec un état vide.", aside.display()));
+            problems.push(format!(
+                "État illisible ({e}) : mis de côté dans {}, démarrage avec un état vide.",
+                aside.display()
+            ));
             return Loaded { state: AppState::default(), problems };
         }
     };

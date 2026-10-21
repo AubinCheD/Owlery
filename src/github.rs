@@ -25,24 +25,35 @@ pub enum FetchError {
     /// Jeton refusé, expiré ou sans les droits nécessaires.
     Unauthorized,
     /// Quota d'appels épuisé ; reprise possible à cette date (secondes Unix) si elle est connue.
-    RateLimited { reset: Option<i64> },
+    RateLimited {
+        reset: Option<i64>,
+    },
     Network(String),
-    Http { status: u16, body: String },
+    Http {
+        status: u16,
+        body: String,
+    },
     Parse(String),
 }
 
 impl std::fmt::Display for FetchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            FetchError::NoAccess => f.write_str("Aucun accès à GitHub : ajoutez un jeton, ou installez gh puis lancez `gh auth login`."),
-            FetchError::Unauthorized => f.write_str("Accès refusé : le jeton est invalide, expiré ou n'a pas les droits nécessaires."),
+            FetchError::NoAccess => {
+                f.write_str("Aucun accès à GitHub : ajoutez un jeton, ou installez gh puis lancez `gh auth login`.")
+            }
+            FetchError::Unauthorized => {
+                f.write_str("Accès refusé : le jeton est invalide, expiré ou n'a pas les droits nécessaires.")
+            }
             FetchError::RateLimited { reset: Some(t) } => {
                 let at = chrono::DateTime::from_timestamp(*t, 0)
                     .map(|d| d.with_timezone(&chrono::Local).format("%H:%M").to_string())
                     .unwrap_or_default();
                 write!(f, "Quota d'appels GitHub épuisé : nouvelle lecture à {at}.")
             }
-            FetchError::RateLimited { reset: None } => f.write_str("Quota d'appels GitHub épuisé : nouvelle lecture plus tard."),
+            FetchError::RateLimited { reset: None } => {
+                f.write_str("Quota d'appels GitHub épuisé : nouvelle lecture plus tard.")
+            }
             FetchError::Network(m) => write!(f, "Erreur réseau : {m}"),
             FetchError::Http { status, body } => write!(f, "GitHub a répondu {status} : {}", truncate(body, 300)),
             FetchError::Parse(m) => write!(f, "Réponse inattendue de GitHub : {m}"),
@@ -76,8 +87,7 @@ pub struct TokenTransport {
 impl TokenTransport {
     pub fn new(token: String) -> Self {
         use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
-        let tls =
-            TlsConfig::builder().provider(TlsProvider::NativeTls).root_certs(RootCerts::PlatformVerifier).build();
+        let tls = TlsConfig::builder().provider(TlsProvider::NativeTls).root_certs(RootCerts::PlatformVerifier).build();
         let agent = ureq::Agent::config_builder()
             .tls_config(tls)
             .proxy(ureq::Proxy::try_from_env())
@@ -129,13 +139,17 @@ impl GhTransport {
     /// `gh` trouvé dans le PATH ou à son emplacement d'installation habituel.
     pub fn find() -> Option<Self> {
         let names: &[&str] = if cfg!(windows) { &["gh.exe"] } else { &["gh"] };
-        let mut dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
-        if cfg!(windows) {
-            if let Some(pf) = std::env::var_os("ProgramFiles") {
-                dirs.push(PathBuf::from(pf).join("GitHub CLI"));
-            }
+        let mut dirs: Vec<PathBuf> =
+            std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+        if cfg!(windows)
+            && let Some(pf) = std::env::var_os("ProgramFiles")
+        {
+            dirs.push(PathBuf::from(pf).join("GitHub CLI"));
         }
-        dirs.iter().flat_map(|d| names.iter().map(move |n| d.join(n))).find(|p| p.is_file()).map(|exe| GhTransport { exe })
+        dirs.iter()
+            .flat_map(|d| names.iter().map(move |n| d.join(n)))
+            .find(|p| p.is_file())
+            .map(|exe| GhTransport { exe })
     }
 }
 
@@ -165,10 +179,10 @@ impl Transport for GhTransport {
 
 /// Statut HTTP lu dans le message d'erreur de `gh` (« HTTP 401: Bad credentials »), 401 s'il n'est pas connecté.
 fn gh_status(stderr: &str) -> u16 {
-    if let Some(i) = stderr.find("HTTP ") {
-        if let Some(code) = stderr[i + 5..].get(..3).and_then(|c| c.parse().ok()) {
-            return code;
-        }
+    if let Some(i) = stderr.find("HTTP ")
+        && let Some(code) = stderr[i + 5..].get(..3).and_then(|c| c.parse().ok())
+    {
+        return code;
     }
     if stderr.contains("gh auth login") { 401 } else { 500 }
 }
@@ -204,12 +218,7 @@ pub fn fetch(t: &dyn Transport) -> Result<Vec<Item>, FetchError> {
         let found = value["items"].as_array().ok_or_else(|| FetchError::Parse("liste « items » absente".into()))?;
         items.extend(found.iter().filter_map(|v| parse_search_item(v, kind)));
     }
-    let mut details = 0;
-    for item in items.iter_mut().filter(|i| matches!(i.kind, Kind::ReviewRequested | Kind::MyPr)) {
-        if details == MAX_DETAILS {
-            break;
-        }
-        details += 1;
+    for item in items.iter_mut().filter(|i| matches!(i.kind, Kind::ReviewRequested | Kind::MyPr)).take(MAX_DETAILS) {
         match pull_details(t, &item.repo, item.number.unwrap_or_default()) {
             Ok((branch, ci)) => {
                 item.branch = branch;
@@ -230,7 +239,9 @@ pub fn fetch(t: &dyn Transport) -> Result<Vec<Item>, FetchError> {
 fn encode(q: &str) -> String {
     q.bytes()
         .map(|b| match b {
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b':' | b'@' => (b as char).to_string(),
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b':' | b'@' => {
+                (b as char).to_string()
+            }
             b' ' => "+".into(),
             _ => format!("%{b:02X}"),
         })
@@ -284,9 +295,10 @@ pub fn ci_state(runs: &Value, status: &Value) -> Option<Ci> {
     let mut states = Vec::new();
     for run in runs["check_runs"].as_array().into_iter().flatten() {
         states.push(match (run["status"].as_str(), run["conclusion"].as_str()) {
-            (Some("completed"), Some("failure" | "timed_out" | "cancelled" | "action_required" | "startup_failure")) => {
-                Ci::Failure
-            }
+            (
+                Some("completed"),
+                Some("failure" | "timed_out" | "cancelled" | "action_required" | "startup_failure"),
+            ) => Ci::Failure,
             (Some("completed"), _) => Ci::Success,
             _ => Ci::Pending,
         });
@@ -342,15 +354,24 @@ mod tests {
         let q = |s: &str| format!("search/issues?q={}", encode(s));
         let mut m = BTreeMap::new();
         let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
-        m.insert(leak(q("is:open is:pr review-requested:@me")), search(&issue("contoso/api", 142, "Ajoute la pagination")));
+        m.insert(
+            leak(q("is:open is:pr review-requested:@me")),
+            search(&issue("contoso/api", 142, "Ajoute la pagination")),
+        );
         m.insert(leak(q("is:open is:pr author:@me")), search(&issue("contoso/api", 138, "Corrige l'export")));
         m.insert(leak(q("is:open mentions:@me")), search(&issue("fabrikam/web", 57, "Question sur le cache")));
         m.insert(leak(q("is:open is:issue assignee:@me")), search(""));
         m.insert("repos/contoso/api/pulls/142", ok(r#"{"head":{"ref":"pagination","sha":"aaa"}}"#));
         m.insert("repos/contoso/api/pulls/138", ok(r#"{"head":{"ref":"export","sha":"bbb"}}"#));
-        m.insert("repos/contoso/api/commits/aaa/check-runs", ok(r#"{"check_runs":[{"status":"completed","conclusion":"success"}]}"#));
+        m.insert(
+            "repos/contoso/api/commits/aaa/check-runs",
+            ok(r#"{"check_runs":[{"status":"completed","conclusion":"success"}]}"#),
+        );
         m.insert("repos/contoso/api/commits/aaa/status", ok(r#"{"state":"pending","total_count":0}"#));
-        m.insert("repos/contoso/api/commits/bbb/check-runs", ok(r#"{"check_runs":[{"status":"completed","conclusion":"failure"}]}"#));
+        m.insert(
+            "repos/contoso/api/commits/bbb/check-runs",
+            ok(r#"{"check_runs":[{"status":"completed","conclusion":"failure"}]}"#),
+        );
         m.insert("repos/contoso/api/commits/bbb/status", ok(r#"{"state":"success","total_count":1}"#));
         Fake(m)
     }

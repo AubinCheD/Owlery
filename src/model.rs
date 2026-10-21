@@ -100,7 +100,9 @@ pub enum Status {
     Unread,
     Read,
     /// Masquée jusqu'à cette date (secondes Unix).
-    Snoozed { until: i64 },
+    Snoozed {
+        until: i64,
+    },
     Done,
 }
 

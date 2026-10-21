@@ -111,7 +111,8 @@ impl Inbox {
         self.marks.retain(|id, _| last_seen.get(id).is_some_and(|t| now - t < FORGOTTEN_AFTER_SECS));
         let marks = &self.marks;
         let items = &self.items;
-        self.last_seen.retain(|id, t| now - *t < FORGOTTEN_AFTER_SECS || marks.contains_key(id) || items.contains_key(id));
+        self.last_seen
+            .retain(|id, t| now - *t < FORGOTTEN_AFTER_SECS || marks.contains_key(id) || items.contains_key(id));
     }
 
     pub fn status(&self, item: &Item, now: i64) -> Status {
@@ -228,7 +229,9 @@ mod tests {
         let ids: Vec<String> = inbox.items.keys().cloned().collect();
         inbox.set_status(&ids[0], Status::Done);
         inbox.set_status(&ids[1], Status::Snoozed { until: 2000 });
-        let count = |inbox: &Inbox, now| inbox.view(&Filter::default(), GroupBy::Kind, now).iter().map(|g| g.entries.len()).sum::<usize>();
+        let count = |inbox: &Inbox, now| {
+            inbox.view(&Filter::default(), GroupBy::Kind, now).iter().map(|g| g.entries.len()).sum::<usize>()
+        };
         assert_eq!(count(&inbox, 1000), 1);
         assert_eq!(count(&inbox, 2000), 2);
         let all = Filter { show_hidden: true, ..Filter::default() };
