@@ -149,7 +149,8 @@ fn local_actions(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context, item: &c
             app.changed();
         }
     });
-    let dragontree = actions::find_dragontree(&app.st.settings.dragontree_exe);
+    let lookups = app.lookups();
+    let dragontree = lookups.dragontree.clone();
     let hint = if dragontree.is_none() {
         "dragontree.exe introuvable : indiquez son chemin dans les réglages"
     } else if dir.is_none() {
@@ -170,7 +171,7 @@ fn local_actions(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context, item: &c
     }
     let claude_hint = if dir.is_none() {
         "Choisissez d'abord le dossier local du dépôt".to_string()
-    } else if app.fawkes.available() {
+    } else if lookups.fawkes_up {
         "Fawkes ouvre une session Claude dans un worktree de la branche ; le contexte est collé, pas envoyé".to_string()
     } else {
         "Fawkes n'écoute pas encore : vous pourrez le démarrer, ou copier le contexte".to_string()
@@ -211,7 +212,7 @@ fn local_actions(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context, item: &c
 pub fn fawkes_dialog(app: &mut App, ctx: &egui::Context) {
     let Some(dialog) = &app.fawkes_dialog else { return };
     let (line, context) = (dialog.line.clone(), dialog.context.clone());
-    let exe = app.fawkes.find_exe(&app.st.settings.fawkes_exe);
+    let exe = app.lookups().fawkes_exe;
     let mut choice = None;
     egui::Modal::new(egui::Id::unique("fawkes")).show(ctx, |ui| {
         ui.set_width(460.0);
@@ -241,7 +242,7 @@ pub fn fawkes_dialog(app: &mut App, ctx: &egui::Context) {
     match choice {
         Some(1) => {
             app.fawkes_dialog = None;
-            app.send_to_fawkes(ctx, line, true);
+            app.send_to_fawkes(ctx, line, context, true);
         }
         Some(2) => {
             app.fawkes_dialog = None;

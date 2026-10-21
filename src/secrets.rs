@@ -9,12 +9,26 @@ pub trait SecretStore: Send + Sync {
     fn get(&self, key: &str) -> Result<Option<String>, String>;
     fn set(&self, key: &str, secret: &str) -> Result<(), String>;
     fn delete(&self, key: &str) -> Result<(), String>;
+    /// Est-ce le coffre de l'OS (et pas un coffre en mémoire) ?
+    fn is_os(&self) -> bool {
+        false
+    }
+}
+
+/// Le coffre de la session : celui de l'OS, ou en mémoire pour la démonstration (qui ne doit jamais toucher
+/// aux vrais jetons).
+pub fn store_for(demo: bool) -> std::sync::Arc<dyn SecretStore> {
+    if demo { std::sync::Arc::new(MemoryStore::default()) } else { std::sync::Arc::new(OsStore) }
 }
 
 /// Le Gestionnaire d'identifiants de Windows.
 pub struct OsStore;
 
 impl SecretStore for OsStore {
+    fn is_os(&self) -> bool {
+        true
+    }
+
     fn get(&self, key: &str) -> Result<Option<String>, String> {
         match entry(key)?.get_password() {
             Ok(s) => Ok(Some(s)),
@@ -71,6 +85,12 @@ impl SecretStore for MemoryStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn demo_never_touches_the_os_store() {
+        assert!(!store_for(true).is_os());
+        assert!(store_for(false).is_os());
+    }
 
     #[test]
     fn tokens_are_trimmed_and_empty_ones_refused() {

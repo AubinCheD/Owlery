@@ -6,7 +6,7 @@ use std::sync::mpsc::channel;
 use eframe::egui::{self, RichText};
 
 use crate::app::{AccountDraft, App};
-use crate::forges::{Account, Auth, GH_ACCOUNT_ID, normalize_host};
+use crate::forges::{Account, Auth, FetchError, GH_ACCOUNT_ID, normalize_host};
 use crate::model::Forge;
 
 /// Droits minimaux et page de création du jeton, par forge.
@@ -25,7 +25,8 @@ pub fn token_help(forge: Forge, host: &str, orgs: &str) -> (&'static str, String
             let org = orgs.split(',').map(str::trim).find(|o| !o.is_empty()).unwrap_or("<organisation>");
             (
                 "Jeton d'accès personnel, en lecture seule : Code, Work Items et Build. Indiquez la ou les \
-                 organisations (séparées par des virgules).",
+                 organisations (séparées par des virgules). Azure DevOps Server : l'hôte du serveur, et en \
+                 organisation le chemin de la collection (par exemple tfs/DefaultCollection).",
                 format!("https://{host}/{org}/_usersSettings/tokens"),
             )
         }
@@ -212,7 +213,13 @@ fn start_check(app: &mut App, ctx: &egui::Context) {
 fn poll_check(app: &mut App, ctx: &egui::Context) {
     let Some(d) = &mut app.draft else { return };
     let Some(rx) = &d.checking else { return };
-    let Ok(result) = rx.try_recv() else { return };
+    let result = match rx.try_recv() {
+        Ok(r) => r,
+        Err(std::sync::mpsc::TryRecvError::Empty) => return,
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            Err(FetchError::Network("vérification interrompue (erreur interne)".into()))
+        }
+    };
     d.checking = None;
     match result {
         Err(e) => d.error = Some(format!("Vérification refusée : {e}")),

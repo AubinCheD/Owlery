@@ -77,7 +77,7 @@ pub fn verify(http: &dyn Http, account: &Account, token: &str) -> Result<Identit
         let (_, display) = me(http, token, &account.host, org).map_err(|e| in_org(org, e))?;
         name = display;
     }
-    Ok(Identity { username: name.clone(), display_name: name, orgs: Vec::new() })
+    Ok(Identity { username: name.clone(), display_name: name })
 }
 
 /// L'erreur d'une organisation, nommée : une organisation en échec arrête la lecture du compte (son
@@ -102,7 +102,7 @@ pub fn fetch(http: &dyn Http, account: &Account, token: &str, _seen: &Seen) -> R
     for org in orgs(account)? {
         items.extend(fetch_org(http, account, token, org, &mut notes).map_err(|e| in_org(org, e))?);
     }
-    Ok(Fetched { items: dedupe(items), notes })
+    Ok(Fetched { items: dedupe(items), notes, ..Fetched::default() })
 }
 
 fn fetch_org(
@@ -126,7 +126,11 @@ fn fetch_org(
             if kind == Kind::ReviewRequested && my_vote(&pr, &me) != 0 {
                 continue;
             }
-            if let Some(item) = parse_pull_request(&pr, kind, account, org) {
+            if let Some(mut item) = parse_pull_request(&pr, kind, account, org) {
+                if kind == Kind::MyPr {
+                    // Les votes des autres (approuvé, à revoir…) comptent dans l'activité de mes PR.
+                    item.activity = Some(votes_by_others(&pr, &me));
+                }
                 prs.push(item);
             }
         }
@@ -140,7 +144,7 @@ fn fetch_org(
                     item.updated_at = item.updated_at.max(d.activity_at);
                     item.last_by_me = d.last_by_me;
                     if kind == Kind::MyPr {
-                        item.activity = Some(d.others_comments);
+                        item.activity = Some(item.activity.unwrap_or(0) + d.others_comments);
                     }
                     match d.build {
                         Ok((ci, checks)) => {
@@ -208,6 +212,18 @@ fn pull_requests(http: &dyn Http, token: &str, base: &str, query: &str) -> Resul
 
 fn values(v: &Value) -> Vec<Value> {
     v["value"].as_array().cloned().unwrap_or_default()
+}
+
+/// Relecteurs autres que moi qui ont voté.
+fn votes_by_others(pr: &Value, me: &str) -> u32 {
+    pr["reviewers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| {
+            r["vote"].as_i64().unwrap_or(0) != 0 && !r["id"].as_str().is_some_and(|id| id.eq_ignore_ascii_case(me))
+        })
+        .count() as u32
 }
 
 fn my_vote(pr: &Value, me: &str) -> i64 {
@@ -620,6 +636,18 @@ mod tests {
             c.iter().map(|c| c.body.as_str()).collect::<Vec<_>>(),
             ["Deuxième remarque", "Troisième remarque", "Quatrième remarque"]
         );
+    }
+
+    #[test]
+    fn azure_missing_field_skips_the_entry() {
+        let f = fake();
+        f.route(
+            &format!("{B}/_apis/git/pullrequests?searchCriteria.reviewerId"),
+            Reply::ok(r#"{"value":[{"pullRequestId":90,"title":"sans dépôt"}]}"#),
+        );
+        let items = fetch(&f, &account(&["fabrikam"]), "t", &Seen::new()).unwrap().items;
+        assert!(items.iter().all(|i| i.number != Some(90)));
+        assert!(items.iter().any(|i| i.number == Some(77)), "le reste est lu");
     }
 
     #[test]

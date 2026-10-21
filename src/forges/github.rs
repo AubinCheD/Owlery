@@ -149,11 +149,7 @@ fn gh_status(stderr: &str) -> u16 {
 pub fn verify(t: &dyn Transport) -> Result<Identity, FetchError> {
     let user = check(t.get("user")?)?;
     let login = user["login"].as_str().ok_or_else(|| FetchError::Parse("« login » absent".into()))?;
-    Ok(Identity {
-        username: login.to_string(),
-        display_name: user["name"].as_str().unwrap_or_default().to_string(),
-        orgs: Vec::new(),
-    })
+    Ok(Identity { username: login.to_string(), display_name: user["name"].as_str().unwrap_or_default().to_string() })
 }
 
 /// Recherches, dans l'ordre. La recherche exige `is:pr` ou `is:issue` : les mentions sont donc lues deux fois.
@@ -171,6 +167,7 @@ const SEARCHES: [(&str, Kind, &str); 5] = [
 pub fn fetch(t: &dyn Transport, account: &Account, seen: &Seen) -> Result<Fetched, FetchError> {
     let mut items = Vec::new();
     let mut notes = Vec::new();
+    let mut incomplete = false;
     for (query, kind, label) in SEARCHES {
         let path = format!("search/issues?q={}&sort=updated&order=desc&per_page={PER_PAGE}", encode(query));
         let value = check(t.get(&path)?)?;
@@ -179,6 +176,8 @@ pub fn fetch(t: &dyn Transport, account: &Account, seen: &Seen) -> Result<Fetche
         if total > found.len() {
             notes.push(format!("{label} : {} affichées sur {total}", found.len()));
         } else if value["incomplete_results"].as_bool() == Some(true) {
+            // GitHub n'a pas tout renvoyé : ce qui manque reste en cache plutôt que de disparaître.
+            incomplete = true;
             notes.push(format!("{label} : résultats incomplets (délai de recherche de GitHub dépassé)"));
         }
         items.extend(found.iter().filter_map(|v| parse_search_item(v, kind, account)));
@@ -219,7 +218,7 @@ pub fn fetch(t: &dyn Transport, account: &Account, seen: &Seen) -> Result<Fetche
             Err(_) => {}
         }
     }
-    Ok(Fetched { items, notes })
+    Ok(Fetched { items, notes, incomplete, me: Some(me) })
 }
 
 /// Le commentaire est-il de moi, et assez récent pour être la dernière activité ?
@@ -278,15 +277,33 @@ fn pull_details(t: &dyn Transport, item: &mut Item, me: &str) -> Result<(), Fetc
         item.checks = failing_checks(&runs, &status);
     }
     if item.kind == Kind::MyPr {
-        let reviews = check(t.get(&format!("repos/{repo}/pulls/{number}/reviews?per_page=100"))?)?;
-        let by_others = reviews
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|r| r["user"]["login"].as_str().is_some_and(|l| !l.eq_ignore_ascii_case(me)))
-            .count() as u32;
-        let comments = pull["comments"].as_u64().unwrap_or(0) + pull["review_comments"].as_u64().unwrap_or(0);
-        item.activity = Some(comments as u32 + by_others);
+        // Ce que les autres ont fait : revues, commentaires de la PR et commentaires de revue. Les miens ne
+        // comptent pas : répondre sur ma PR ne la remet pas en non lu.
+        // `total` : nombre annoncé par la PR (aucun appel s'il est nul) ; au-delà de la première page (100), le
+        // reste est compté comme venant des autres.
+        let by_others = |path: String, total: Option<u64>| -> Result<u32, FetchError> {
+            if total == Some(0) {
+                return Ok(0);
+            }
+            let list = check(t.get(&path)?)?;
+            let list = list.as_array().cloned().unwrap_or_default();
+            let others = list
+                .iter()
+                .filter(|c| c["user"]["login"].as_str().is_some_and(|l| !l.eq_ignore_ascii_case(me)))
+                .count() as u64;
+            let beyond = total.map(|t| t.saturating_sub(list.len() as u64)).unwrap_or(0);
+            Ok((others + beyond) as u32)
+        };
+        let reviews = by_others(format!("repos/{repo}/pulls/{number}/reviews?per_page=100"), None)?;
+        let comments = by_others(
+            format!("repos/{repo}/issues/{number}/comments?per_page=100"),
+            Some(pull["comments"].as_u64().unwrap_or(0)),
+        )?;
+        let review_comments = by_others(
+            format!("repos/{repo}/pulls/{number}/comments?per_page=100"),
+            Some(pull["review_comments"].as_u64().unwrap_or(0)),
+        )?;
+        item.activity = Some(reviews + comments + review_comments);
         if item.ci == Some(Ci::Failure) {
             item.kind = Kind::CiFailed;
         }
@@ -436,6 +453,14 @@ mod tests {
             Reply::ok(r#"[{"user":{"login":"dominique"}},{"user":{"login":"Camille"}}]"#),
         );
         m.insert(
+            "repos/contoso/api/issues/138/comments".into(),
+            Reply::ok(r#"[{"user":{"login":"camille"}},{"user":{"login":"sam"}}]"#),
+        );
+        m.insert(
+            "repos/contoso/api/pulls/138/comments".into(),
+            Reply::ok(r#"[{"user":{"login":"sam"}},{"user":{"login":"alex"}},{"user":{"login":"camille"}}]"#),
+        );
+        m.insert(
             "repos/contoso/api/commits/aaa/check-runs".into(),
             Reply::ok(r#"{"check_runs":[{"status":"completed","conclusion":"success"}]}"#),
         );
@@ -471,8 +496,8 @@ mod tests {
             mine.checks,
             vec![Check { name: "tests".into(), url: "https://github.com/contoso/api/runs/9".into() }]
         );
-        // 2 commentaires + 3 commentaires de revue + 1 revue d'un autre (la mienne ne compte pas).
-        assert_eq!(mine.activity, Some(6));
+        // Seulement les autres : 1 revue, 1 commentaire, 2 commentaires de revue (les miens ne comptent pas).
+        assert_eq!(mine.activity, Some(4));
         let mention = items.iter().find(|i| i.number == Some(57)).unwrap();
         assert_eq!(mention.kind, Kind::Mention);
         assert_eq!(mention.target, Target::Issue);
@@ -488,6 +513,21 @@ mod tests {
         assert_eq!(review.branch, None);
         assert!(review.partial);
         assert_eq!(got.notes.len(), 1);
+    }
+
+    #[test]
+    fn incomplete_results_are_flagged() {
+        let mut f = fake();
+        let q = format!("search/issues?q={}", encode(SEARCHES[3].0));
+        let body = format!(
+            r#"{{"total_count":1,"incomplete_results":true,"items":[{}]}}"#,
+            issue("fabrikam/web", 57, "t", false, 0)
+        );
+        f.0.insert(q, Reply::ok(&body));
+        let got = fetch(&f, &account(), &Seen::new()).unwrap();
+        assert!(got.incomplete, "la fusion gardera ce qui manque");
+        assert!(got.notes.iter().any(|n| n.contains("incomplets")));
+        assert_eq!(got.me.as_deref(), Some("camille"));
     }
 
     #[test]

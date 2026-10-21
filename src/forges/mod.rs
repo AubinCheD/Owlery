@@ -142,20 +142,25 @@ pub fn accounts_to_read(configured: &[Account], gh_available: bool) -> Vec<Accou
 /// Clé du jeton GitHub du premier jet (0.1.0), avant les comptes.
 pub const FIRST_DRAFT_TOKEN: &str = "github:token";
 
-/// Reprend le jeton GitHub du premier jet dans un compte : la nouvelle entrée du coffre est écrite avant
-/// que l'ancienne soit supprimée. Vrai si un compte a été créé.
+/// Reprend le jeton GitHub du premier jet dans un compte : le jeton est copié sous la clé du nouveau compte.
+/// L'ancienne entrée n'est **pas** supprimée ici : seulement une fois l'état (qui porte le compte) enregistré
+/// (`forget_first_draft_token`), sinon un arrêt entre les deux perdrait le compte. Vrai si un compte a été créé.
 pub fn migrate_first_draft_token(store: &dyn SecretStore, accounts: &mut Vec<Account>) -> Result<bool, String> {
     let Some(token) = store.get(FIRST_DRAFT_TOKEN)?.filter(|t| !t.trim().is_empty()) else { return Ok(false) };
     if accounts.iter().any(|a| a.forge == Forge::GitHub && a.auth == Auth::Token) {
-        // Déjà repris (l'ancienne entrée n'a pas pu être supprimée la dernière fois).
+        // Déjà repris, et l'état qui porte le compte a été enregistré : l'ancienne entrée peut partir.
         store.delete(FIRST_DRAFT_TOKEN)?;
         return Ok(false);
     }
     let account = Account::new(Forge::GitHub, "github.com", Vec::new(), Auth::Token);
     store.set(&account.token_key(), &token)?;
     accounts.push(account);
-    store.delete(FIRST_DRAFT_TOKEN)?;
     Ok(true)
+}
+
+/// Supprime le jeton du premier jet, une fois l'état qui porte son compte enregistré.
+pub fn forget_first_draft_token(store: &dyn SecretStore) -> Result<(), String> {
+    store.delete(FIRST_DRAFT_TOKEN)
 }
 
 /// Erreur d'une lecture.
@@ -219,6 +224,10 @@ impl std::fmt::Display for FetchError {
 pub struct Fetched {
     pub items: Vec<Item>,
     pub notes: Vec<String>,
+    /// La forge a dit ne pas tout renvoyer : ce qui manque reste en cache.
+    pub incomplete: bool,
+    /// Nom de l'utilisateur du jeton, appris pendant la lecture (compte repris du premier jet, `gh`).
+    pub me: Option<String>,
 }
 
 /// Entrées lues ou terminées → ce qui en a été vu (`Mark::seen_updated_at`).
@@ -229,8 +238,6 @@ pub type Seen = BTreeMap<String, i64>;
 pub struct Identity {
     pub username: String,
     pub display_name: String,
-    /// Organisations trouvées (Azure DevOps), si le compte n'en indiquait pas.
-    pub orgs: Vec<String>,
 }
 
 /// Ce qu'Owlery demande aux forges (réel : `ForgeFetcher` ; tests : réponses fictives).
@@ -440,6 +447,12 @@ mod tests {
         assert_eq!(accounts.len(), 1);
         assert_eq!(accounts[0].host, "github.com");
         assert_eq!(store.get(&accounts[0].token_key()).unwrap().as_deref(), Some("ghp_fictif"));
+        assert_eq!(
+            store.get(FIRST_DRAFT_TOKEN).unwrap().as_deref(),
+            Some("ghp_fictif"),
+            "gardé tant que l'état n'est pas enregistré"
+        );
+        forget_first_draft_token(&store).unwrap();
         assert_eq!(store.get(FIRST_DRAFT_TOKEN).unwrap(), None);
         // Une ancienne entrée revenue (suppression ratée) ne crée pas un second compte.
         store.set(FIRST_DRAFT_TOKEN, "ghp_fictif").unwrap();

@@ -16,7 +16,7 @@ use windows_sys::Win32::UI::Shell::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateIcon, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, HICON, HWND_MESSAGE, MSG, PostMessageW,
-    RegisterClassW, TranslateMessage, WM_APP, WNDCLASSW,
+    RegisterClassW, RegisterWindowMessageW, TranslateMessage, WM_APP, WNDCLASSW,
 };
 
 /// Message de l'icône vers la fenêtre.
@@ -32,7 +32,8 @@ enum Cmd {
 
 static WINDOW: AtomicIsize = AtomicIsize::new(0);
 static QUEUE: Mutex<Vec<Cmd>> = Mutex::new(Vec::new());
-static CLICKED: AtomicBool = AtomicBool::new(false);
+/// Message que l'Explorateur diffuse quand il redémarre : les icônes de la zone de notification sont perdues.
+static TASKBAR_CREATED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -53,6 +54,8 @@ pub fn start() -> bool {
             ..std::mem::zeroed()
         };
         RegisterClassW(&wc);
+        let taskbar = wide("TaskbarCreated");
+        TASKBAR_CREATED.store(RegisterWindowMessageW(taskbar.as_ptr()), Ordering::Relaxed);
         let hwnd = CreateWindowExW(
             0,
             class.as_ptr(),
@@ -99,11 +102,6 @@ pub fn hide() {
     post(Cmd::Hide);
 }
 
-/// La notification ou l'icône a-t-elle été cliquée depuis le dernier appel ?
-pub fn take_click() -> bool {
-    CLICKED.swap(false, Ordering::Relaxed)
-}
-
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WAKE => {
@@ -117,11 +115,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             // Version 4 : l'événement est dans le mot bas de `lparam`.
             let event = (lparam as u32) & 0xFFFF;
             if event == NIN_BALLOONUSERCLICK || event == NIN_SELECT || event == NIN_SELECT | NINF_KEY {
-                CLICKED.store(true, Ordering::Relaxed);
                 // Windows autorise le premier plan juste après le clic de l'utilisateur.
                 super::bring_to_front();
                 unsafe { apply(hwnd, Cmd::Hide) };
             }
+            0
+        }
+        m if m != 0 && m == TASKBAR_CREATED.load(Ordering::Relaxed) => {
+            // L'Explorateur a redémarré : l'icône n'existe plus, la prochaine notification la recréera.
+            SHOWN.store(false, Ordering::Relaxed);
             0
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },

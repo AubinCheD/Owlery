@@ -22,10 +22,15 @@ pub struct Inbox {
     /// Dernière fois qu'une entrée a été vue sur sa forge (pour oublier les choix trop anciens).
     #[serde(default)]
     pub last_seen: BTreeMap<String, i64>,
+    /// Comptes lus au moins une fois : la première lecture d'un compte ne notifie rien (sinon une avalanche).
+    #[serde(default)]
+    pub fetched: BTreeSet<String>,
     /// Entrées et choix enregistrés par une autre version et illisibles par celle-ci : gardés tels quels et
     /// réécrits à l'enregistrement (voir `state`).
     #[serde(skip)]
     pub unreadable: BTreeMap<String, Value>,
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, Value>,
 }
 
 /// Regroupement de la liste.
@@ -50,6 +55,8 @@ pub struct Filter {
     pub waiting_only: bool,
     /// Montrer aussi les entrées terminées et reportées.
     pub show_hidden: bool,
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, Value>,
 }
 
 /// Règles permanentes des réglages : dépôts ignorés, robots masqués. Elles valent aussi pour le compteur et
@@ -151,8 +158,16 @@ impl Inbox {
     /// absentes depuis plus de 30 jours sont oubliés. Une de mes PR vue pour la première fois est marquée lue
     /// (elle n'est pas une nouvelle) ; une activité qui est la mienne est absorbée.
     pub fn merge(&mut self, account: &str, forge: Forge, fetched: Vec<Item>, now: i64) -> Merged {
+        self.merge_with(account, forge, fetched, true, now)
+    }
+
+    /// `merge`, pour une lecture qui peut être incomplète (`complete` faux : la forge a dit ne pas tout
+    /// renvoyer) : les entrées du compte qu'elle n'a pas renvoyées sont alors gardées.
+    pub fn merge_with(&mut self, account: &str, forge: Forge, fetched: Vec<Item>, complete: bool, now: i64) -> Merged {
         let belongs = |i: &Item| i.account == account || (i.account.is_empty() && i.forge == forge);
-        let first_fetch = !self.items.values().any(belongs);
+        // Premier chargement : jamais lu, et rien en cache (les entrées du premier jet comptent comme lues).
+        let first_fetch = !self.fetched.contains(account) && !self.items.values().any(belongs);
+        self.fetched.insert(account.to_string());
         let before_unread: BTreeSet<String> = self
             .items
             .values()
@@ -167,6 +182,7 @@ impl Inbox {
             }
             !belongs(item)
         });
+        let returned: BTreeSet<String> = fetched.iter().map(|i| i.id.clone()).collect();
         for mut item in fetched {
             if item.partial {
                 // Détail illisible cette fois : celui du cache, plutôt qu'une CI qui disparaît.
@@ -174,7 +190,8 @@ impl Inbox {
                     item.branch = item.branch.take().or_else(|| old.branch.clone());
                     item.ci = old.ci;
                     item.checks = old.checks.clone();
-                    item.activity = old.activity;
+                    item.activity = item.activity.or(old.activity);
+                    item.updated_at = item.updated_at.max(old.updated_at);
                     if old.kind == Kind::CiFailed && item.kind == Kind::MyPr {
                         item.kind = Kind::CiFailed;
                     }
@@ -183,16 +200,35 @@ impl Inbox {
             }
             self.last_seen.insert(item.id.clone(), now);
             if let Some(mark) = self.marks.get_mut(&item.id) {
-                if item.last_by_me && matches!(mark.status, Status::Read | Status::Done) {
-                    mark.absorb(&item);
+                if matches!(mark.status, Status::Read | Status::Done) {
+                    if item.last_by_me {
+                        mark.absorb(&item);
+                    }
+                    // Passé à un type qui n'est pas une nouvelle (CI redevenue verte) : c'est vu, pour qu'un
+                    // nouveau passage au rouge le soit à nouveau.
+                    if mark.seen_kind.is_some_and(|k| k != item.kind) && !item.kind.is_news() {
+                        mark.seen_kind = Some(item.kind);
+                    }
                 }
             } else if item.kind == Kind::MyPr && !known.contains(&item.id) {
                 self.marks.insert(item.id.clone(), Mark::new(Status::Read, &item, None));
             }
             self.items.insert(item.id.clone(), item);
         }
-        let last_seen = &self.last_seen;
-        self.marks.retain(|id, _| last_seen.get(id).is_some_and(|t| now - t < FORGOTTEN_AFTER_SECS));
+        if !complete {
+            // Lecture incomplète : ce qu'elle n'a pas renvoyé reste en cache, plutôt que de disparaître et de
+            // revenir « nouveau » à la lecture suivante.
+            for (id, old) in previous {
+                if !returned.contains(&id) {
+                    self.items.insert(id, old);
+                }
+            }
+        }
+        let (last_seen, items) = (&self.last_seen, &self.items);
+        // Un choix est gardé tant que son entrée est en cache, et 30 jours après sa disparition de la forge.
+        self.marks.retain(|id, _| {
+            items.contains_key(id) || last_seen.get(id).is_some_and(|t| now - t < FORGOTTEN_AFTER_SECS)
+        });
         let (marks, items) = (&self.marks, &self.items);
         self.last_seen
             .retain(|id, t| now - *t < FORGOTTEN_AFTER_SECS || marks.contains_key(id) || items.contains_key(id));
@@ -202,6 +238,17 @@ impl Inbox {
     /// Retire les entrées d'un compte supprimé (leurs choix suivent la règle des 30 jours).
     pub fn remove_account(&mut self, account: &str) {
         self.items.retain(|_, i| i.account != account);
+        self.fetched.remove(account);
+    }
+
+    /// Retire les entrées des comptes qui ne sont plus lus (compte « gh » remplacé par un compte GitHub, gh
+    /// désinstallé…) : sinon elles resteraient en attente pour toujours. Les entrées du premier jet (sans compte)
+    /// attendent d'être rattachées. Renvoie le nombre d'entrées retirées.
+    pub fn retain_accounts(&mut self, accounts: &BTreeSet<String>) -> usize {
+        let before = self.items.len();
+        self.items.retain(|_, i| i.account.is_empty() || accounts.contains(&i.account));
+        self.fetched.retain(|a| accounts.contains(a));
+        before - self.items.len()
     }
 
     pub fn status(&self, item: &Item, now: i64) -> Status {
@@ -501,6 +548,56 @@ mod tests {
         items.push(answered);
         inbox.merge("a", Forge::GitHub, items, 1100);
         assert_eq!(inbox.status(&inbox.items[&id1], 1100), Status::Read);
+    }
+
+    #[test]
+    fn a_quiet_account_notifies_its_first_arrival() {
+        let mut inbox = Inbox::default();
+        assert!(inbox.merge("calme", Forge::GitLab, vec![], 1000).first_fetch);
+        assert!(!inbox.merge("calme", Forge::GitLab, vec![], 1100).first_fetch, "déjà lu, même vide");
+        let mut first = item("northwind/app", 1, Kind::ReviewRequested, 1100);
+        first.account = "calme".into();
+        assert!(!inbox.merge("calme", Forge::GitLab, vec![first], 1200).first_fetch);
+    }
+
+    #[test]
+    fn ci_turning_red_again_is_news() {
+        let mut inbox = Inbox::default();
+        let mut pr = item("contoso/api", 7, Kind::CiFailed, 100);
+        pr.activity = Some(1);
+        inbox.merge("a", Forge::GitHub, vec![pr.clone()], 1000);
+        inbox.set_status(&pr.id, Status::Done, None);
+        // Je pousse un correctif : la CI repasse au vert.
+        pr.kind = Kind::MyPr;
+        inbox.merge("a", Forge::GitHub, vec![pr.clone()], 1100);
+        assert_eq!(inbox.status(&inbox.items[&pr.id], 1100), Status::Done);
+        // Puis de nouveau au rouge : elle revient.
+        pr.kind = Kind::CiFailed;
+        inbox.merge("a", Forge::GitHub, vec![pr.clone()], 1200);
+        assert_eq!(inbox.status(&inbox.items[&pr.id], 1200), Status::Unread);
+    }
+
+    #[test]
+    fn orphan_entries_leave_and_choices_stay_while_cached() {
+        let mut inbox = sample();
+        let id1 = id(&inbox, 1);
+        inbox.set_status(&id1, Status::Done, None);
+        // Le compte « a » n'est plus lu depuis longtemps ; un autre l'est.
+        inbox.merge("b", Forge::GitLab, vec![], 1000 + FORGOTTEN_AFTER_SECS + 10);
+        assert_eq!(inbox.marks[&id1].status, Status::Done, "l'entrée est encore en cache : son choix reste");
+        assert_eq!(inbox.retain_accounts(&["b".to_string()].into()), 3);
+        assert!(inbox.items.is_empty());
+        assert!(!inbox.fetched.contains("a"));
+    }
+
+    #[test]
+    fn incomplete_reads_keep_what_they_did_not_return() {
+        let mut inbox = sample();
+        let kept: Vec<Item> = inbox.items.values().filter(|i| i.number == Some(1)).cloned().collect();
+        inbox.merge_with("a", Forge::GitHub, kept.clone(), false, 1100);
+        assert_eq!(inbox.items.len(), 3);
+        inbox.merge_with("a", Forge::GitHub, kept, true, 1200);
+        assert_eq!(inbox.items.len(), 1);
     }
 
     #[test]

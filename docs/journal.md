@@ -116,3 +116,44 @@ Un relecteur neuf (sous-agent, lecture seule) a relu tout le premier jet : 24 po
   egui_kittest) ; démonstration capturée ; second lancement vérifié (il passe la main en 0,1 s).
 - Non vérifié : GitHub, GitLab et Azure DevOps réels (point 1, plus tard) ; la bulle de notification
   et le clic dessus (l'écran du poste est en veille).
+
+### Revue de toute la branche (0.2.0)
+
+Un second relecteur neuf a relu toute la branche (`2bc0dd8..d22a864`) : rien de critique, six points
+importants, des points mineurs. Trois des points importants ont été confirmés par des tests jetables.
+Décisions :
+
+| Point | Suite |
+|---|---|
+| La première arrivée d'un compte vide n'était jamais notifiée | corrigé : comptes déjà lus gardés dans l'état (`fetched`) |
+| Une CI de nouveau rouge passait inaperçue | corrigé : le type vu suit la CI redevenue verte, le rouge suivant est une nouvelle |
+| Entrées orphelines (compte « gh » remplacé, gh désinstallé) à jamais en attente, choix oubliés après 30 jours | corrigé : entrées des comptes qui ne sont plus lus retirées à chaque actualisation ; un choix vit tant que son entrée est en cache |
+| GitHub : mes réponses remettaient mes PR en non lu | corrigé : le compteur ne compte que les commentaires, commentaires de revue et revues des autres |
+| Jeton du premier jet perdu si l'état n'est pas enregistrable | corrigé : pas de reprise sans enregistrement possible ; l'ancienne entrée du coffre part après le premier enregistrement |
+| Tests prévus par le plan absents | ajoutés : lecture qui panique, actualisation pendant une lecture, compte en échec qui garde son cache, erreur sans cache, défilement au clavier, démo sans coffre de l'OS, refus de Fawkes, champ manquant d'Azure, échec d'enregistrement, reprise du jeton |
+| Azure : une organisation en échec arrête tout le compte (écart au plan) | gardé, et consigné dans le plan : un cache gelé et une erreur nommée plutôt qu'un cache effacé en silence |
+| Contexte copié après un refus de Fawkes : celui de la sélection du moment | corrigé : le contexte voyage avec la demande |
+| Fils de fond terminés anormalement (vérification d'un compte, Fawkes, parcours des dossiers) | corrigé : l'interface sort de l'attente et le dit |
+| Canal : un client muet bloquait le serveur | corrigé : une instance du tube et un fil par client |
+| Zone de notification après un redémarrage de l'Explorateur | corrigé (`TaskbarCreated`) ; clic jamais lu retiré |
+| `migrate_v1` pouvait paniquer sur une entrée abîmée | corrigé |
+| Un compte illisible vidait la liste des comptes ; clés inconnues de la boîte, des filtres, de la fenêtre perdues | corrigé : comptes lus un par un, illisibles gardés tels quels ; clés inconnues gardées |
+| Détail incomplet : activité GitLab écrasée, date d'Azure qui recule | corrigé |
+| `incomplete_results` de GitHub remplaçait le cache | corrigé : ce que la recherche n'a pas renvoyé reste en cache |
+| Rappels de report pour des dépôts ignorés ou des robots | corrigé |
+| Ctrl+Z dans un champ de texte annulait un choix de la boîte | corrigé : Ctrl+Z, Y, A, C, V, X restent au champ |
+| Compte repris du premier jet sans nom (« GitHub · compte ») | corrigé : le nom appris pendant la lecture est gardé |
+| Azure : les votes ne faisaient pas revenir mes PR | corrigé (votes des autres comptés) ; **GitLab : approbations non comptées** (limite gardée) |
+| Recherches à chaque image (PATH, canal de Fawkes) | corrigé : gardées 2 s |
+| Résumé sans le nombre de comptes lus | corrigé (« Lu à 10:32 (2 comptes sur 3) ») |
+| `Identity.orgs` jamais rempli | retiré |
+| Azure DevOps Server sous `/tfs` | expliqué dans l'aide : la collection va en organisation (`tfs/DefaultCollection`) |
+| Contexte pour Claude : texte venu de la forge | étiqueté comme tel dans la consigne |
+
+**Limites gardées** (choix de Claude, à revoir si elles gênent) :
+
+- les dossiers choisis à la main et les dépôts ignorés sont repérés par `propriétaire/nom` seul : un
+  même nom sur deux forges partage le réglage ;
+- une entrée vue par deux comptes (même PR sur le même hôte) n'en a qu'un : le dernier lu ;
+- une demande à une application qui ne répond pas laisse un fil bloqué jusqu'à la fin de son délai ;
+- GitLab : les approbations ne font pas revenir mes MR (seulement les notes).

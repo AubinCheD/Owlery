@@ -24,11 +24,7 @@ fn get(http: &dyn Http, token: &str, url: &str) -> Result<Value, FetchError> {
 pub fn verify(http: &dyn Http, account: &Account, token: &str) -> Result<Identity, FetchError> {
     let user = get(http, token, &format!("{}/user", api_base(&account.host)))?;
     let username = user["username"].as_str().ok_or_else(|| FetchError::Parse("« username » absent".into()))?;
-    Ok(Identity {
-        username: username.to_string(),
-        display_name: user["name"].as_str().unwrap_or_default().to_string(),
-        orgs: Vec::new(),
-    })
+    Ok(Identity { username: username.to_string(), display_name: user["name"].as_str().unwrap_or_default().to_string() })
 }
 
 /// Nombre maximal d'entrées dont on vérifie si la dernière note est la mienne, à chaque lecture.
@@ -111,7 +107,7 @@ pub fn fetch(http: &dyn Http, account: &Account, token: &str, seen: &Seen) -> Re
             Err(_) => {}
         }
     }
-    Ok(Fetched { items, notes })
+    Ok(Fetched { items, notes, me: Some(me), ..Fetched::default() })
 }
 
 /// `contoso/api!42` ou `contoso/api#12` → `contoso/api`.

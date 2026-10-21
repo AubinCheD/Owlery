@@ -124,11 +124,15 @@ impl Fetcher for DemoFetcher {
     }
 
     fn verify(&self, _account: &Account, _token: &str) -> Result<Identity, FetchError> {
-        Ok(Identity { username: "camille".into(), display_name: "Camille Martin".into(), orgs: Vec::new() })
+        Ok(Identity { username: "camille".into(), display_name: "Camille Martin".into() })
     }
 
     fn fetch(&self, account: &Account, _seen: &Seen) -> Result<Fetched, FetchError> {
-        Ok(Fetched { items: items().into_iter().filter(|i| i.account == account.id).collect(), notes: Vec::new() })
+        Ok(Fetched {
+            items: items().into_iter().filter(|i| i.account == account.id).collect(),
+            notes: Vec::new(),
+            ..Fetched::default()
+        })
     }
 
     fn comments(&self, _account: &Account, item: &Item) -> Result<Vec<Comment>, FetchError> {

@@ -13,7 +13,7 @@ Une priorité suivie de « (estimée) » ne ressort pas des échanges : c'est un
 |---|---|---|---|
 | V1 | Premier essai contre GitHub réel, avec le jeton de l'utilisateur | utilisateur | haute |
 | V2 | Essai réel de GitLab et d'Azure DevOps | utilisateur | moyenne (estimée) |
-| 0.2 | Version 0.2 (tâches 0 à 12 du plan) | Claude | faite, revue de branche en cours |
+| 0.2 | Version 0.2 (tâches 0 à 12 du plan) | Claude | faite (revue de branche corrigée) |
 | C1 | Contrat local reçu par Fawkes (canal nommé, demande `ouvrir`) | Fawkes | haute (estimée) |
 | C2 | DragonTree : ouvrir sur une branche, badge « PR à relire » | DragonTree | basse (estimée) |
 | P | Pistes | — | basse |
@@ -53,7 +53,7 @@ même commit (le modèle et l'interface ont été refaits d'un bloc, voir le jou
 | 9 | dossiers locaux des dépôts | fait |
 | 10 | Corriger avec Claude (Fawkes) | fait |
 | 11 | annuler, tout marquer lu, dépôts ignorés, vue gardée | fait |
-| 12 | version 0.2.0, revue de branche | en cours |
+| 12 | version 0.2.0, revue de branche | fait |
 
 ## Dépendances vers les autres applications
 

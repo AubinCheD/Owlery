@@ -77,7 +77,7 @@ Tests : `cargo test` (logique, réponses fictives des forges, canal nommé, et i
 |---|---|---|
 | GitHub | `github.com` ou GitHub Enterprise | à grain fin : Metadata, Pull requests, Issues, Commit statuses, Checks ; ou classique « repo » |
 | GitLab | `gitlab.com` ou une instance | portée « read_api » |
-| Azure DevOps | `dev.azure.com` (ou un serveur), une ou plusieurs organisations | Code, Work Items, Build |
+| Azure DevOps | `dev.azure.com` et une ou plusieurs organisations ; ou un serveur, avec la collection en organisation (`tfs/DefaultCollection`) | Code, Work Items, Build |
 
 - Le jeton est **vérifié** auprès de la forge, puis rangé dans le Gestionnaire d'identifiants de Windows
   (service « Owlery ») et nulle part ailleurs ; il n'est plus jamais affiché. *Retirer* le supprime du
@@ -100,8 +100,9 @@ Tests : `cargo test` (logique, réponses fictives des forges, canal nommé, et i
 - Une PR ou un ticket n'apparaît qu'une fois, avec le type le plus utile.
 - Une entrée lue ou terminée **revient en non lu** quand elle bouge : nouvelle activité, CI devenue
   rouge, revue demandée. Pas quand l'activité est la mienne (mon dernier commentaire), ni, pour mes
-  PR, quand je pousse : elles reviennent quand quelqu'un commente ou relit. Une de mes PR vue pour la
-  première fois arrive lue.
+  PR, quand je pousse : elles reviennent quand quelqu'un d'autre commente ou relit (GitHub : commentaires,
+  commentaires de revue et revues ; Azure DevOps : commentaires et votes ; GitLab : notes, pas les
+  approbations). Une de mes PR vue pour la première fois arrive lue.
 - Une liste tronquée (plus de 50 résultats), un détail illisible ou une organisation en échec sont
   signalés dans la ligne d'état (infobulle), jamais passés sous silence ; le cache du compte est gardé.
 

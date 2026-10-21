@@ -153,18 +153,39 @@ fn read_line(r: &mut impl Read) -> Result<String, String> {
     String::from_utf8(out).map_err(|_| "message illisible (UTF-8 attendu)".into())
 }
 
-/// Ouvre le canal et traite les demandes, une à la fois, dans un fil dédié. Erreur si le canal existe déjà (une
-/// autre instance, ou une autre application qui l'aurait pris).
-pub fn serve(name: &str, handler: impl Fn(&str) -> String + Send + 'static) -> std::io::Result<()> {
+/// Ouvre le canal et traite les demandes dans un fil dédié : une instance du tube par client, chacun dans son
+/// fil, pour qu'un client qui se connecte sans rien envoyer ne bloque pas les suivants. Erreur si le canal existe
+/// déjà (une autre instance, ou une autre application qui l'aurait pris).
+pub fn serve(name: &str, handler: impl Fn(&str) -> String + Send + Sync + 'static) -> std::io::Result<()> {
     let sid = current_user_sid().ok_or_else(|| std::io::Error::other("SID de l'utilisateur introuvable"))?;
-    let handle = create(name, &sid)?;
-    let file = unsafe { File::from_raw_handle(handle as RawHandle) };
+    // La première instance est créée ici, pour que l'erreur remonte à l'appelant.
+    let first = create(name, &sid, true)? as usize;
+    let handler = std::sync::Arc::new(handler);
+    let name = name.to_string();
     std::thread::Builder::new().name("owlery-canal".into()).spawn(move || {
+        let mut next = Some(first);
         loop {
-            let h = file.as_raw_handle() as HANDLE;
+            // Les poignées passent d'un fil à l'autre sous forme d'entier (HANDLE n'est pas `Send`).
+            let raw = match next.take() {
+                Some(h) => h,
+                None => match create(&name, &sid, false) {
+                    Ok(h) => h as usize,
+                    Err(_) => {
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                        continue;
+                    }
+                },
+            };
+            let h = raw as HANDLE;
             let connected =
                 unsafe { ConnectNamedPipe(h, std::ptr::null_mut()) != 0 || GetLastError() == ERROR_PIPE_CONNECTED };
-            if connected {
+            if !connected {
+                unsafe { CloseHandle(h) };
+                continue;
+            }
+            let handler = handler.clone();
+            std::thread::spawn(move || {
+                let file = unsafe { File::from_raw_handle(raw as RawHandle) };
                 let mut reader = &file;
                 let reply = match read_line(&mut reader) {
                     Ok(line) => handler(&line),
@@ -172,15 +193,18 @@ pub fn serve(name: &str, handler: impl Fn(&str) -> String + Send + 'static) -> s
                 };
                 let mut writer = &file;
                 let _ = writer.write_all(format!("{reply}\n").as_bytes());
-                unsafe { FlushFileBuffers(h) };
-            }
-            unsafe { DisconnectNamedPipe(h) };
+                unsafe {
+                    FlushFileBuffers(raw as HANDLE);
+                    DisconnectNamedPipe(raw as HANDLE);
+                }
+                // `file` ferme la poignée.
+            });
         }
     })?;
     Ok(())
 }
 
-fn create(name: &str, sid: &str) -> std::io::Result<HANDLE> {
+fn create(name: &str, sid: &str, first: bool) -> std::io::Result<HANDLE> {
     unsafe {
         // Accès complet pour l'utilisateur courant seulement ; rien pour les autres.
         let sddl = wide(&format!("D:P(A;;GA;;;{sid})"));
@@ -202,7 +226,7 @@ fn create(name: &str, sid: &str) -> std::io::Result<HANDLE> {
         let w = wide(name);
         let h = CreateNamedPipeW(
             w.as_ptr(),
-            PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            PIPE_ACCESS_DUPLEX | if first { FILE_FLAG_FIRST_PIPE_INSTANCE } else { 0 },
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
             PIPE_UNLIMITED_INSTANCES,
             4096,
@@ -239,6 +263,9 @@ mod tests {
         assert_eq!(request(&name, "abc", Duration::from_secs(5)), Ok("reçu 3".into()));
         // Le serveur se remet en écoute après chaque demande.
         assert_eq!(request(&name, "abcdef\n", Duration::from_secs(5)), Ok("reçu 6".into()));
+        // Un client qui se connecte sans rien envoyer ne bloque pas les autres.
+        let _muet = std::fs::OpenOptions::new().read(true).write(true).open(&name).unwrap();
+        assert_eq!(request(&name, "xyz", Duration::from_secs(5)), Ok("reçu 3".into()));
         // Le même canal ne peut pas être ouvert deux fois.
         assert!(serve(&name, |_| String::new()).is_err());
     }

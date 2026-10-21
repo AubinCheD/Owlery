@@ -209,6 +209,11 @@ impl Binding {
         !self.ctrl && !self.alt && !matches!(self.key, Key::F1 | Key::F2 | Key::F3 | Key::F4 | Key::F5 | Key::Escape)
     }
 
+    /// Ctrl+Z, Ctrl+Y, Ctrl+A, Ctrl+C, Ctrl+V, Ctrl+X agissent sur le champ de texte qui a le focus.
+    fn edits_text(&self) -> bool {
+        self.ctrl && !self.alt && matches!(self.key, Key::Z | Key::Y | Key::A | Key::C | Key::V | Key::X)
+    }
+
     /// Entrée et Espace actionnent le bouton qui a le focus : ils lui restent.
     fn activates_widget(&self) -> bool {
         !self.ctrl && !self.alt && matches!(self.key, Key::Enter | Key::Space)
@@ -310,7 +315,7 @@ impl Shortcuts {
             let Some((b, repeat)) = Binding::from_event(ev) else { return true };
             let left = match focus {
                 Focus::None => false,
-                Focus::Text | Focus::Modal => b.types_text(),
+                Focus::Text | Focus::Modal => b.types_text() || b.edits_text(),
                 Focus::Widget => b.activates_widget(),
             };
             if left {
@@ -391,6 +396,15 @@ mod tests {
         let mut events = vec![key(Key::R, false)];
         assert_eq!(s.take_commands(&mut events, Focus::None), vec![Command::MarkRead]);
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn undo_in_a_text_field_stays_with_the_field() {
+        let s = Shortcuts::from_settings(&BTreeMap::new());
+        let mut events = vec![key(Key::Z, true)];
+        assert!(s.take_commands(&mut events, Focus::Text).is_empty());
+        assert_eq!(events.len(), 1);
+        assert_eq!(s.take_commands(&mut events, Focus::None), vec![Command::Undo]);
     }
 
     #[test]

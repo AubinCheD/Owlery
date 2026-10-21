@@ -55,6 +55,9 @@ pub struct Settings {
     pub notify_kinds: BTreeSet<Kind>,
     /// Dépôts ignorés, robots masqués.
     pub rules: Rules,
+    /// Comptes écrits par une autre version et illisibles par celle-ci : réécrits tels quels.
+    #[serde(skip)]
+    pub unreadable_accounts: Vec<Value>,
     #[serde(flatten)]
     pub unknown: BTreeMap<String, Value>,
 }
@@ -74,6 +77,7 @@ impl Default for Settings {
             notify: true,
             notify_kinds: crate::notify::default_kinds(),
             rules: Rules::default(),
+            unreadable_accounts: Vec::new(),
             unknown: BTreeMap::new(),
         }
     }
@@ -86,11 +90,13 @@ pub struct WindowState {
     pub size: [f32; 2],
     pub pos: Option<[f32; 2]>,
     pub maximized: bool,
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, Value>,
 }
 
 impl Default for WindowState {
     fn default() -> Self {
-        WindowState { size: [1100.0, 700.0], pos: None, maximized: false }
+        WindowState { size: [1100.0, 700.0], pos: None, maximized: false, unknown: BTreeMap::new() }
     }
 }
 
@@ -205,8 +211,22 @@ fn parse_lenient(mut value: Value, problems: &mut Vec<String>) -> AppState {
         saved_by: top.remove("saved_by").and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default(),
         ..AppState::default()
     };
-    if let Some(raw) = top.remove("settings") {
+    if let Some(mut raw) = top.remove("settings") {
+        // Les comptes, un par un : un compte écrit par une version plus récente est gardé tel quel.
+        let accounts = raw.as_object_mut().and_then(|m| m.remove("accounts"));
         st.settings = lenient_struct(raw, "Réglage", problems);
+        for a in accounts.and_then(|a| a.as_array().cloned()).unwrap_or_default() {
+            match serde_json::from_value::<Account>(a.clone()) {
+                Ok(account) => st.settings.accounts.push(account),
+                Err(_) => st.settings.unreadable_accounts.push(a),
+            }
+        }
+        if !st.settings.unreadable_accounts.is_empty() {
+            problems.push(format!(
+                "{} compte(s) écrits par une autre version ne sont pas lisibles par celle-ci : gardés tels quels, mais pas lus.",
+                st.settings.unreadable_accounts.len()
+            ));
+        }
     }
     if let Some(raw) = top.remove("view") {
         st.view = serde_json::from_value(raw).unwrap_or_default();
@@ -242,6 +262,10 @@ fn parse_lenient(mut value: Value, problems: &mut Vec<String>) -> AppState {
         if let Some(Value::Object(seen)) = inbox.remove("last_seen") {
             st.inbox.last_seen = seen.into_iter().filter_map(|(k, v)| v.as_i64().map(|t| (k, t))).collect();
         }
+        if let Some(raw) = inbox.remove("fetched") {
+            st.inbox.fetched = serde_json::from_value(raw).unwrap_or_default();
+        }
+        st.inbox.unknown = inbox.into_iter().collect();
         let n = st.inbox.unreadable.len();
         if n > 0 {
             problems.push(format!(
@@ -306,7 +330,10 @@ fn migrate_v1(value: &mut Value) {
         let mut out: Map<String, Value> = Map::new();
         for (id, mut item) in items {
             let new = strip(&id);
-            item["id"] = Value::String(new.clone());
+            // Une entrée abîmée (pas un objet) est gardée telle quelle : le chargeur la mettra de côté.
+            if let Some(obj) = item.as_object_mut() {
+                obj.insert("id".into(), Value::String(new.clone()));
+            }
             if out.get(&new).is_none_or(|kept| rank(&item) < rank(kept)) {
                 out.insert(new, item);
             }
@@ -358,6 +385,9 @@ pub fn serialize(state: &AppState) -> Vec<u8> {
         if let Some(Value::Object(map)) = value["inbox"].get_mut(section) {
             map.entry(id.to_string()).or_insert_with(|| raw.clone());
         }
+    }
+    if let Some(Value::Array(accounts)) = value["settings"].get_mut("accounts") {
+        accounts.extend(state.settings.unreadable_accounts.iter().cloned());
     }
     serde_json::to_vec_pretty(&value).expect("l'état se sérialise toujours")
 }
@@ -471,6 +501,43 @@ mod tests {
         assert_eq!(json["futur"]["a"], 1);
         assert_eq!(json["settings"]["bientot"], true);
         assert_eq!(json["inbox"]["items"]["GitHub:contoso/api#1"]["nouveau"], "oui");
+    }
+
+    #[test]
+    fn an_unreadable_account_is_kept_and_the_others_read() {
+        let dir = temp("comptes");
+        std::fs::write(
+            state_path(&dir),
+            r#"{"version":2,"saved_by":"9.0.0","settings":{"refresh_minutes":7,"accounts":[
+                {"id":"a1","forge":"GitHub","host":"github.com"},
+                {"id":"b2","forge":"Bitbucket","host":"bitbucket.org"}]},
+                "inbox":{"items":{},"plus_tard":{"x":1}},"view":{"waiting_only":true,"tri":"date"},
+                "window":{"size":[800.0,600.0],"ecran":2}}"#,
+        )
+        .unwrap();
+        let back = load(&dir);
+        assert_eq!(back.state.settings.refresh_minutes, 7);
+        assert_eq!(back.state.settings.accounts.len(), 1);
+        assert!(back.problems.iter().any(|p| p.contains("1 compte(s)")), "{:?}", back.problems);
+        let json: Value = serde_json::from_slice(&serialize(&back.state)).unwrap();
+        assert_eq!(json["settings"]["accounts"].as_array().unwrap().len(), 2);
+        assert_eq!(json["settings"]["accounts"][1]["forge"], "Bitbucket");
+        assert_eq!(json["inbox"]["plus_tard"]["x"], 1);
+        assert_eq!(json["view"]["tri"], "date");
+        assert_eq!(json["window"]["ecran"], 2);
+    }
+
+    #[test]
+    fn a_damaged_first_draft_entry_does_not_stop_the_start() {
+        let dir = temp("v1-abime");
+        std::fs::write(
+            state_path(&dir),
+            r#"{"version":1,"saved_by":"0.1.0","inbox":{"items":{"GitHub:contoso/api#1:Mention":"abîmé"}}}"#,
+        )
+        .unwrap();
+        let back = load(&dir);
+        assert!(back.state.inbox.items.is_empty());
+        assert_eq!(back.state.inbox.unreadable.len(), 1);
     }
 
     #[test]

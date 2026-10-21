@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use owlery::app::{self, App, StartOptions};
 use owlery::contract::{self, Snapshot};
 use owlery::forges::{Fetcher, ForgeFetcher, http::UreqHttp};
-use owlery::secrets::{MemoryStore, OsStore, SecretStore};
+use owlery::secrets::SecretStore;
 use owlery::state;
 
 fn main() -> eframe::Result {
@@ -70,7 +70,7 @@ fn main() -> eframe::Result {
     #[cfg(not(windows))]
     drop(incoming_tx);
 
-    let store: Arc<dyn SecretStore> = if demo { Arc::new(MemoryStore::default()) } else { Arc::new(OsStore) };
+    let store: Arc<dyn SecretStore> = owlery::secrets::store_for(demo);
     let fetcher: Arc<dyn Fetcher> = if demo {
         Arc::new(owlery::demo::DemoFetcher)
     } else {

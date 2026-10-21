@@ -17,6 +17,20 @@ use crate::secrets::SecretStore;
 use crate::shortcuts::{Command, Focus, Shortcuts};
 use crate::state::{self, AppState, ThemeChoice, WindowState};
 
+/// Demande à Fawkes en cours : la réponse attendue, et le contexte à copier si elle échoue.
+pub struct FawkesJob {
+    pub rx: Receiver<Result<String, String>>,
+    pub context: String,
+}
+
+/// Recherches coûteuses, gardées un instant (voir `App::lookups`).
+#[derive(Clone, Debug, Default)]
+pub struct Lookups {
+    pub fawkes_up: bool,
+    pub fawkes_exe: Option<PathBuf>,
+    pub dragontree: Option<PathBuf>,
+}
+
 /// Commentaires en cours de lecture : entrée, état vu, réponse attendue.
 type CommentJob = (String, i64, Receiver<Result<Vec<Comment>, FetchError>>);
 
@@ -180,6 +194,11 @@ pub struct App {
     pub(crate) toasts: Vec<(String, Instant)>,
     dirty: bool,
     last_save: Option<Instant>,
+    /// Le jeton du premier jet a été repris : son ancienne entrée du coffre part après le premier enregistrement.
+    forget_first_draft: bool,
+    /// Fawkes écoute-t-il, et où sont `dragontree.exe` et `fawkes.exe` : vérifié au plus toutes les 2 s, pas à
+    /// chaque image.
+    lookups: Option<(Instant, Lookups)>,
     pub(crate) save_error: Option<String>,
 
     pub(crate) accounts_open: bool,
@@ -188,7 +207,7 @@ pub struct App {
     pub(crate) capturing: Option<(Command, usize)>,
     pub(crate) palette: Option<(String, usize)>,
     pub(crate) fawkes_dialog: Option<FawkesDialog>,
-    pub(crate) fawkes_job: Option<Receiver<Result<String, String>>>,
+    pub(crate) fawkes_job: Option<FawkesJob>,
 
     incoming: Option<Receiver<Incoming>>,
     snapshot: Arc<Mutex<Snapshot>>,
@@ -212,15 +231,18 @@ impl App {
         let mut problems = loaded.problems;
         let mut toasts = Vec::new();
         let mut dirty = false;
+        let mut forget_first_draft = false;
         if opts.demo {
             if st.settings.accounts.is_empty() {
                 st.settings.accounts = crate::demo::accounts();
                 dirty = true;
             }
-        } else {
+        } else if opts.writable {
+            // Seulement si l'état peut être enregistré : sinon le compte repris serait perdu au lancement suivant.
             match forges::migrate_first_draft_token(opts.store.as_ref(), &mut st.settings.accounts) {
                 Ok(true) => {
                     dirty = true;
+                    forget_first_draft = true;
                     toasts.push((
                         "Le jeton GitHub du premier jet a été repris dans un compte".to_string(),
                         Instant::now(),
@@ -264,6 +286,8 @@ impl App {
             toasts,
             dirty,
             last_save: None,
+            forget_first_draft,
+            lookups: None,
             save_error: None,
             accounts_open: false,
             draft: None,
@@ -339,6 +363,12 @@ impl App {
         self.gh_available = self.fetcher.gh_available();
         let accounts = self.accounts();
         self.no_access = accounts.is_empty();
+        // Entrées des comptes qui ne sont plus lus (compte « gh » remplacé, gh désinstallé) : retirées, sinon
+        // elles attendraient pour toujours.
+        let ids: BTreeSet<String> = accounts.iter().map(|a| a.id.clone()).collect();
+        if self.st.inbox.retain_accounts(&ids) > 0 {
+            self.changed();
+        }
         let now = now();
         for account in accounts {
             if self.status.get(&account.id).and_then(|s| s.hold_until).is_some_and(|t| now < t) {
@@ -379,7 +409,14 @@ impl App {
                     status.error = None;
                     status.hold_until = None;
                     status.notes = fetched.notes;
-                    let merged = self.st.inbox.merge(&id, account.forge, fetched.items, now);
+                    let merged = self.st.inbox.merge_with(&id, account.forge, fetched.items, !fetched.incomplete, now);
+                    // Nom appris pendant la lecture (compte repris du premier jet) : pour le titre du compte.
+                    if let (Some(me), Some(a)) = (fetched.me, self.st.settings.accounts.iter_mut().find(|a| a.id == id))
+                        && a.username.is_empty()
+                        && !me.is_empty()
+                    {
+                        a.username = me;
+                    }
                     let s = &self.st.settings;
                     self.pending_arrivals.extend(crate::notify::arrivals(
                         &merged.before_unread,
@@ -432,7 +469,10 @@ impl App {
         if due.is_empty() {
             return;
         }
-        let items: Vec<Item> = due.iter().filter_map(|id| self.st.inbox.items.get(id).cloned()).collect();
+        // Les dépôts ignorés et les robots masqués ne rappellent rien non plus.
+        let rules = self.rules().clone();
+        let items: Vec<Item> =
+            due.iter().filter_map(|id| self.st.inbox.items.get(id)).filter(|i| rules.shows(i)).cloned().collect();
         self.changed();
         self.notify(&[], &items);
     }
@@ -503,11 +543,14 @@ impl App {
 
     fn poll_scan(&mut self) {
         let Some(rx) = &self.scan_job else { return };
-        if let Ok(found) = rx.try_recv() {
-            self.found_repos = found;
-            self.scan_job = None;
-            self.scanning = false;
+        match rx.try_recv() {
+            Ok(found) => self.found_repos = found,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            // Parcours interrompu : on garde ce qui était connu.
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
         }
+        self.scan_job = None;
+        self.scanning = false;
     }
 
     /// Dossier local d'une entrée : celui choisi à la main, sinon celui trouvé dans les dossiers racines.
@@ -529,15 +572,15 @@ impl App {
             None => item.repo.clone(),
         };
         let line = contract::fawkes_open(&dir, &title, item.branch.as_deref(), &context);
-        if self.fawkes.available() {
-            self.send_to_fawkes(ctx, line, false);
+        if self.lookups().fawkes_up {
+            self.send_to_fawkes(ctx, line, context, false);
         } else {
             self.fawkes_dialog = Some(FawkesDialog { id: id.to_string(), line, context });
         }
     }
 
     /// Envoie la demande à Fawkes en arrière-plan ; `start` : le démarrer d'abord et attendre son canal.
-    pub(crate) fn send_to_fawkes(&mut self, ctx: &egui::Context, line: String, start: bool) {
+    pub(crate) fn send_to_fawkes(&mut self, ctx: &egui::Context, line: String, context: String, start: bool) {
         let exe = if start {
             match self.fawkes.find_exe(&self.st.settings.fawkes_exe) {
                 Some(exe) => Some(exe),
@@ -568,22 +611,44 @@ impl App {
             let _ = tx.send(result);
             ctx.request_repaint();
         });
-        self.fawkes_job = Some(rx);
+        self.fawkes_job = Some(FawkesJob { rx, context });
+        self.lookups = None;
     }
 
     fn poll_fawkes(&mut self, ctx: &egui::Context) {
-        let Some(rx) = &self.fawkes_job else { return };
-        let Ok(result) = rx.try_recv() else { return };
+        let Some(job) = &self.fawkes_job else { return };
+        let result = match job.rx.try_recv() {
+            Ok(r) => r,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("demande interrompue (erreur interne)".to_string()),
+        };
+        let context = std::mem::take(&mut self.fawkes_job.as_mut().expect("tâche en cours").context);
         self.fawkes_job = None;
         match result.and_then(|reply| contract::parse_reply(&reply)) {
             Ok(()) => self.toast("Fawkes ouvre une session Claude (consigne collée, pas envoyée)"),
             Err(e) => {
-                if let Some(item) = self.selected.as_ref().and_then(|id| self.st.inbox.items.get(id)) {
-                    ctx.copy_text(crate::actions::claude_context(item));
-                }
+                // Le contexte de l'entrée demandée, pas celui de l'entrée sélectionnée entre-temps.
+                ctx.copy_text(context);
                 self.toast(format!("Fawkes : {e}. Contexte copié dans le presse-papiers à la place."));
             }
         }
+    }
+
+    /// Fawkes écoute-t-il, où sont DragonTree et Fawkes : vérifié au plus toutes les 2 s (le détail est redessiné
+    /// à chaque mouvement de la souris).
+    pub(crate) fn lookups(&mut self) -> Lookups {
+        if let Some((at, l)) = &self.lookups
+            && at.elapsed() < Duration::from_secs(2)
+        {
+            return l.clone();
+        }
+        let l = Lookups {
+            fawkes_up: self.fawkes.available(),
+            fawkes_exe: self.fawkes.find_exe(&self.st.settings.fawkes_exe),
+            dragontree: crate::actions::find_dragontree(&self.st.settings.dragontree_exe),
+        };
+        self.lookups = Some((Instant::now(), l.clone()));
+        l
     }
 
     // --- Entrées --------------------------------------------------------------------------------------
@@ -885,6 +950,12 @@ impl App {
             Ok(()) => {
                 self.dirty = false;
                 self.save_error = None;
+                // L'état porte maintenant le compte repris : l'ancienne entrée du coffre peut partir.
+                if std::mem::take(&mut self.forget_first_draft)
+                    && let Err(e) = forges::forget_first_draft_token(self.store.as_ref())
+                {
+                    self.problems.push(format!("Ancien jeton du premier jet non supprimé du coffre : {e}"));
+                }
             }
             Err(e) => {
                 self.save_error = Some(format!("Enregistrement de l'état impossible ({e}) : nouvel essai dans 30 s."))

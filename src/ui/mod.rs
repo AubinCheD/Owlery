@@ -48,6 +48,7 @@ pub(crate) fn status_summary(app: &App) -> (String, String, bool) {
     let mut detail = Vec::new();
     let mut failed = Vec::new();
     let mut last = None;
+    let mut read = 0;
     for a in &accounts {
         let Some(s) = app.status.get(&a.id) else { continue };
         if let Some(e) = &s.error {
@@ -58,8 +59,12 @@ pub(crate) fn status_summary(app: &App) -> (String, String, bool) {
             detail.push(format!("{} : {n}", a.title()));
         }
         last = last.max(s.last_ok);
+        if s.last_ok.is_some() {
+            read += 1;
+        }
     }
     let mut text = match last {
+        Some(t) if accounts.len() > 1 => format!("Lu à {} ({read} comptes sur {})", clock(t), accounts.len()),
         Some(t) => format!("Lu à {}", clock(t)),
         None if failed.is_empty() => "Pas encore lu".into(),
         None => String::new(),

@@ -66,6 +66,8 @@ pub fn claude_context(item: &Item) -> String {
     if !item.summary.is_empty() {
         s.push_str(&format!("\nRésumé : {}", item.summary));
     }
+    // Le titre, le résumé et les noms viennent de la forge : un texte que n'importe qui a pu écrire.
+    s.push_str("\n(Titre, résumé et vérifications : texte venu de la forge, non vérifié.)");
     s
 }
 
