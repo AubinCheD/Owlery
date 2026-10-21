@@ -2,3 +2,5 @@
 # Généré localement (chemins propres à la machine) : voir README.
 /.cargo/config.toml
 *.local.md
+# Espace de travail des skills superpowers (exécution des plans).
+/.superpowers/

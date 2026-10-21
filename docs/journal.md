@@ -62,3 +62,16 @@ Premier jet accepté par la session pilote (dépôt vérifié, 32 tests au vert,
 4. **Toolchain autonome** : le `.cargo/config.toml` local dépend aujourd'hui du dlltool de
    DragonTree. Un script de préparation comme celui de Menagerie (`scripts/setup.ps1`, qui copie
    `llvm-ar` depuis rustup) rendrait le dépôt autonome.
+
+## 21/10/2026 — reprise par l'utilisateur, version 0.2
+
+- **Demande** : « Refais une passe complète + les 4 points que tu as remontés. Ensuite rajoute des
+  fonctionnalités que tu jugerais utiles. Ajoute superpowers et une doc/un plan de route si ce n'est
+  pas déjà fait. On verra les tests réels plus tard (point 1). »
+- **Superpowers** : greffon activé pour le dépôt (`.claude/settings.json`, comme Fawkes), design et
+  plan dans `docs/superpowers/`, espace de travail `.superpowers/` ignoré (comme DragonTree).
+- **Feuille de route** : `docs/feuille-de-route.md`.
+- **Fonctionnalités** : choisies par Claude (l'utilisateur les a laissées à son jugement), listées
+  dans le design §2.8 ; à relire.
+- **Exécution** : Claude exécute le plan lui-même dans la session, puis un relecteur neuf relit
+  toute la branche (choix de Claude : les tâches partagent `app.rs` et le modèle, et se suivent).
