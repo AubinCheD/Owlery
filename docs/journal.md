@@ -48,3 +48,17 @@ pilote (fawkes-ed) qui le représente jusqu'au premier jet ; elles sont à confi
 - Notifications Windows par type d'événement.
 - Contrat local avec Fawkes et DragonTree, puis *Corriger avec Claude*.
 - Questions ouvertes de la spec (§6) : vue équipe, doublons avec les mails des forges.
+
+## Pistes après le premier jet
+
+Premier jet accepté par la session pilote (dépôt vérifié, 32 tests au vert, capture de la démo).
+
+1. **Premier essai contre GitHub réel**, avec le jeton de l'utilisateur : vérifier les quatre
+   recherches, la CI des PR, les quotas et les messages d'erreur sur de vraies réponses.
+2. **GitLab, Azure DevOps** (jeton saisi, coffre « Owlery », tests sur réponses fictives) et
+   **notifications Windows** par type d'événement.
+3. **Corriger avec Claude** quand Fawkes aura son API locale (canal nommé) ; la proposition
+   `--paste-file` de `docs/contrat-local.md` sera étudiée à ce moment-là.
+4. **Toolchain autonome** : le `.cargo/config.toml` local dépend aujourd'hui du dlltool de
+   DragonTree. Un script de préparation comme celui de Menagerie (`scripts/setup.ps1`, qui copie
+   `llvm-ar` depuis rustup) rendrait le dépôt autonome.
