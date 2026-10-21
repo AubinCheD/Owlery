@@ -25,3 +25,26 @@ pilote (fawkes-ed) qui le représente jusqu'au premier jet ; elles sont à confi
   l'état de Fawkes. Une entrée lue ou terminée redevient non lue si la forge montre une activité plus
   récente ; le choix sur une entrée disparue est gardé 30 jours.
 - **Report** : plus tard (3 h), demain 9 h, lundi 9 h.
+
+## 21/10/2026 — premier jet
+
+- **Captures** : l'écran du poste est en veille, PrintWindow ne rend que du blanc. Capture interne
+  reprise de Fawkes : `OWLERY_CAPTURE=<image.png>` et un fichier `<image.png>.demande`.
+- **Démonstration** : `OWLERY_DEMO=1`, entrées fictives (contoso, fabrikam, northwind), état dans un
+  sous-dossier `demo` pour ne jamais se mêler à l'état réel.
+- **CI** : une de mes PR dont la CI échoue devient une entrée « CI en échec » (au lieu de « Ma PR ») ;
+  les CI des branches suivies hors PR viendront plus tard.
+- **Ouvrir dans DragonTree** : `dragontree.exe <dossier>` ; le dossier local de chaque dépôt est
+  choisi une fois dans le détail et gardé dans les réglages.
+- **Corriger avec Claude** : grisé tant que Fawkes ne reçoit pas de demandes ; à la place, *Copier
+  le contexte pour Claude* (presse-papiers, rien n'est envoyé). Contrat proposé :
+  `docs/contrat-local.md` (ajout d'une option `--paste-file` côté Fawkes).
+- **Jeton GitHub** : l'utilisateur le saisira en reprenant la main ; non vérifié ici contre GitHub
+  réel (aucun accès sur ce poste), seulement sur des réponses fictives.
+
+### Reste à faire
+
+- GitLab et Azure DevOps (jeton saisi, coffre « Owlery », réponses fictives seulement).
+- Notifications Windows par type d'événement.
+- Contrat local avec Fawkes et DragonTree, puis *Corriger avec Claude*.
+- Questions ouvertes de la spec (§6) : vue équipe, doublons avec les mails des forges.

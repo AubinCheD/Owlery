@@ -45,7 +45,63 @@ clic : ouvrir la PR, le dépôt dans DragonTree, ou une session Claude dans Fawk
 - Reçoit ses demandes par le contrat local commun aux applications (canal nommé réservé au compte).
 - Comptes des forges partagés avec DragonTree (mêmes identifiants dans le coffre de Windows).
 
+## Lancer
+
+```
+cargo run --release
+```
+
+Toolchain MSVC : rien à préparer. Toolchain GNU (`stable-x86_64-pc-windows-gnu`) : il faut un
+`dlltool` complet ; le plus simple est de réutiliser celui préparé par DragonTree
+(`scripts\setup-toolchain.ps1` du dépôt DragonTree) et d'écrire un `.cargo/config.toml` local qui y
+pointe (fichier ignoré par git, car il contient des chemins de la machine) :
+
+```toml
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "dlltool=<DragonTree>/.tools/mingw64/bin/dlltool.exe",
+             "-L", "native=<DragonTree>/.tools/mingw64/lib"]
+```
+
+Tests : `cargo test`.
+
+### Accès à GitHub
+
+Au premier lancement, Owlery cherche, dans cet ordre :
+
+1. un **jeton GitHub** saisi dans Owlery (bouton *Jeton GitHub…*), rangé dans le Gestionnaire
+   d'identifiants de Windows (service « Owlery ») et nulle part ailleurs ; *Retirer le jeton* le
+   supprime. Jeton à grain fin conseillé, en lecture seule : Metadata, Pull requests, Issues, Commit
+   statuses, Checks ;
+2. sinon la **CLI `gh`**, si elle est installée et connectée (`gh auth login`) : Owlery l'appelle à
+   chaque lecture et ne garde rien ;
+3. sinon un écran propose les deux.
+
+Aucun jeton n'est jamais lu dans les variables d'environnement.
+
+### Utilisation
+
+- Liste groupée par dépôt ou par type (Ctrl+G), non lus en tête ; filtres par type, forge, texte
+  (Ctrl+F), « seulement ce qui m'attend » (Ctrl+W).
+- ↑ ↓ (ou J K) pour se déplacer, Entrée pour ouvrir dans le navigateur, R lu, U non lu, E terminé,
+  H « me le rappeler demain » ; clic droit sur une entrée pour les autres reports.
+- F5 ou Ctrl+R : actualiser (lecture automatique toutes les 5 min, réglable) ; Ctrl+P : palette ;
+  Ctrl+, : réglages (thème, intervalle, chemin de DragonTree, raccourcis).
+- Une entrée lue ou terminée revient en non lu si la forge montre une activité plus récente.
+- État : `%APPDATA%\Owlery\state.json`, versionné ; un fichier illisible est mis de côté, jamais
+  écrasé.
+
+### Essais
+
+- `OWLERY_DEMO=1` : entrées fictives, aucune lecture réelle ; état dans un sous-dossier `demo`.
+- `OWLERY_DATA_DIR=<dossier>` : dossier d'état isolé.
+- `OWLERY_CAPTURE=<image.png>` : à chaque apparition de `<image.png>.demande`, Owlery enregistre
+  l'image de sa fenêtre (fonctionne écran en veille).
+
 ## Premières étapes
+
+État au 21/10/2026 : 1 et 2 faits, 4 en attente du contrat local de Fawkes
+([`docs/contrat-local.md`](docs/contrat-local.md)). Décisions : [`docs/journal.md`](docs/journal.md).
+
 
 1. Lecture des PR à relire et des CI en échec sur GitHub (un compte), liste simple.
 2. Regroupement par dépôt, état lu / non lu, report.
