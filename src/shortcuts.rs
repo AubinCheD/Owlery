@@ -16,15 +16,18 @@ pub enum Command {
     MarkUnread,
     MarkDone,
     SnoozeTomorrow,
+    MarkAllRead,
+    Undo,
     Find,
     ToggleGroupBy,
     WaitingOnly,
     Palette,
+    Accounts,
     Settings,
 }
 
 impl Command {
-    pub const ALL: [Command; 13] = [
+    pub const ALL: [Command; 16] = [
         Command::Refresh,
         Command::Next,
         Command::Prev,
@@ -33,10 +36,13 @@ impl Command {
         Command::MarkUnread,
         Command::MarkDone,
         Command::SnoozeTomorrow,
+        Command::MarkAllRead,
+        Command::Undo,
         Command::Find,
         Command::ToggleGroupBy,
         Command::WaitingOnly,
         Command::Palette,
+        Command::Accounts,
         Command::Settings,
     ];
 
@@ -51,10 +57,13 @@ impl Command {
             Command::MarkUnread => "mark_unread",
             Command::MarkDone => "mark_done",
             Command::SnoozeTomorrow => "snooze_tomorrow",
+            Command::MarkAllRead => "mark_all_read",
+            Command::Undo => "undo",
             Command::Find => "find",
             Command::ToggleGroupBy => "toggle_group_by",
             Command::WaitingOnly => "waiting_only",
             Command::Palette => "palette",
+            Command::Accounts => "accounts",
             Command::Settings => "settings",
         }
     }
@@ -69,10 +78,13 @@ impl Command {
             Command::MarkUnread => "Marquer non lu",
             Command::MarkDone => "Marquer terminé",
             Command::SnoozeTomorrow => "Me le rappeler demain",
+            Command::MarkAllRead => "Tout marquer lu (liste affichée)",
+            Command::Undo => "Annuler",
             Command::Find => "Chercher",
             Command::ToggleGroupBy => "Grouper par dépôt / par type",
             Command::WaitingOnly => "Seulement ce qui m'attend",
             Command::Palette => "Palette de commandes",
+            Command::Accounts => "Comptes",
             Command::Settings => "Réglages",
         }
     }
@@ -88,12 +100,21 @@ impl Command {
             Command::MarkUnread => [k(false, false, Key::U), None],
             Command::MarkDone => [k(false, false, Key::E), k(false, false, Key::Delete)],
             Command::SnoozeTomorrow => [k(false, false, Key::H), None],
+            Command::MarkAllRead => [k(false, true, Key::R), None],
+            Command::Undo => [k(true, false, Key::Z), None],
             Command::Find => [k(true, false, Key::F), None],
             Command::ToggleGroupBy => [k(true, false, Key::G), None],
             Command::WaitingOnly => [k(true, false, Key::W), None],
             Command::Palette => [k(true, false, Key::P), k(true, true, Key::P)],
+            Command::Accounts => [None, None],
             Command::Settings => [k(true, false, Key::Comma), None],
         }
+    }
+
+    /// Commande qu'on peut répéter en gardant la touche enfoncée (se déplacer) ; les autres (terminer, reporter)
+    /// n'agissent qu'une fois par appui.
+    fn repeats(self) -> bool {
+        matches!(self, Command::Next | Command::Prev)
     }
 }
 
@@ -106,7 +127,7 @@ pub struct Binding {
 }
 
 impl Binding {
-    /// « Ctrl+Maj+P », « Entrée », « F5 ».
+    /// « Ctrl+Maj+P », « Entrée », « Page suiv. ».
     pub fn label(&self) -> String {
         let mut parts: Vec<String> = Vec::new();
         for (on, name) in [(self.ctrl, "Ctrl"), (self.alt, "Alt"), (self.shift, "Maj")] {
@@ -119,12 +140,23 @@ impl Binding {
                 Key::Enter => "Entrée",
                 Key::Escape => "Échap",
                 Key::Delete => "Suppr",
+                Key::Insert => "Inser",
+                Key::Backspace => "Retour arrière",
                 Key::Space => "Espace",
-                Key::ArrowUp => "↑",
-                Key::ArrowDown => "↓",
-                Key::ArrowLeft => "←",
-                Key::ArrowRight => "→",
+                Key::Tab => "Tab",
+                Key::Home => "Origine",
+                Key::End => "Fin",
+                Key::PageUp => "Page préc.",
+                Key::PageDown => "Page suiv.",
+                Key::ArrowUp => "Flèche haut",
+                Key::ArrowDown => "Flèche bas",
+                Key::ArrowLeft => "Flèche gauche",
+                Key::ArrowRight => "Flèche droite",
                 Key::Comma => ",",
+                Key::Period => ".",
+                Key::Minus => "-",
+                Key::Plus => "+",
+                Key::Slash => "/",
                 k => k.name(),
             }
             .to_string(),
@@ -160,9 +192,10 @@ impl Binding {
         Some(b)
     }
 
-    pub fn from_event(ev: &Event) -> Option<Binding> {
+    /// La combinaison d'un appui de touche, et s'il s'agit d'une répétition.
+    pub fn from_event(ev: &Event) -> Option<(Binding, bool)> {
         match ev {
-            Event::Key { key, pressed: true, repeat: _, modifiers, .. } => Some(Self::with(modifiers, *key)),
+            Event::Key { key, pressed: true, repeat, modifiers, .. } => Some((Self::with(modifiers, *key), *repeat)),
             _ => None,
         }
     }
@@ -175,6 +208,24 @@ impl Binding {
     pub fn types_text(&self) -> bool {
         !self.ctrl && !self.alt && !matches!(self.key, Key::F1 | Key::F2 | Key::F3 | Key::F4 | Key::F5 | Key::Escape)
     }
+
+    /// Entrée et Espace actionnent le bouton qui a le focus : ils lui restent.
+    fn activates_widget(&self) -> bool {
+        !self.ctrl && !self.alt && matches!(self.key, Key::Enter | Key::Space)
+    }
+}
+
+/// Ce qui a le focus clavier quand un raccourci arrive.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Focus {
+    /// Rien : tous les raccourcis agissent.
+    None,
+    /// Un champ de texte : les touches qui écrivent lui restent.
+    Text,
+    /// Un autre élément (bouton, case) : Entrée et Espace lui restent.
+    Widget,
+    /// Une fenêtre modale : seuls Ctrl/Alt agissent, et l'interface décide lesquels passent.
+    Modal,
 }
 
 /// Raccourcis en vigueur : les défauts, remplacés par ceux réglés.
@@ -215,10 +266,26 @@ impl Shortcuts {
         self.0.get(&cmd).copied().unwrap_or([None, None])
     }
 
-    pub fn set(&mut self, cmd: Command, slot: usize, binding: Option<Binding>) {
+    /// Donne la combinaison à la commande ; elle est retirée des autres commandes qui l'avaient (renvoyées).
+    pub fn assign(&mut self, cmd: Command, slot: usize, binding: Option<Binding>) -> Vec<Command> {
+        let mut taken_from = Vec::new();
+        if let Some(b) = binding {
+            for (other, slots) in self.0.iter_mut() {
+                if *other == cmd {
+                    continue;
+                }
+                for s in slots.iter_mut() {
+                    if *s == Some(b) {
+                        *s = None;
+                        taken_from.push(*other);
+                    }
+                }
+            }
+        }
         if let Some(slots) = self.0.get_mut(&cmd) {
             slots[slot.min(1)] = binding;
         }
+        taken_from
     }
 
     pub fn reset(&mut self, cmd: Command) {
@@ -235,16 +302,22 @@ impl Shortcuts {
         self.0.iter().filter(|(c, slots)| **c != cmd && slots.contains(&Some(*binding))).map(|(c, _)| *c).collect()
     }
 
-    /// Commandes déclenchées par les événements ; ceux qui en déclenchent une sont retirés. Pendant une
-    /// saisie (`typing`), les touches qui écrivent du texte sont laissées au champ.
-    pub fn take_commands(&self, events: &mut Vec<Event>, typing: bool) -> Vec<Command> {
+    /// Commandes déclenchées par les événements ; ceux qui en déclenchent une sont retirés. Selon le focus,
+    /// certaines touches sont laissées à l'élément qui l'a.
+    pub fn take_commands(&self, events: &mut Vec<Event>, focus: Focus) -> Vec<Command> {
         let mut out = Vec::new();
         events.retain(|ev| {
-            let Some(b) = Binding::from_event(ev) else { return true };
-            if typing && b.types_text() {
+            let Some((b, repeat)) = Binding::from_event(ev) else { return true };
+            let left = match focus {
+                Focus::None => false,
+                Focus::Text | Focus::Modal => b.types_text(),
+                Focus::Widget => b.activates_widget(),
+            };
+            if left {
                 return true;
             }
             match self.0.iter().find(|(_, slots)| slots.contains(&Some(b))) {
+                Some((cmd, _)) if repeat && !cmd.repeats() => false,
                 Some((cmd, _)) => {
                     out.push(*cmd);
                     false
@@ -265,6 +338,10 @@ mod tests {
         Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }
     }
 
+    fn repeated(key: Key) -> Event {
+        Event::Key { key, physical_key: None, pressed: true, repeat: true, modifiers: Modifiers::default() }
+    }
+
     #[test]
     fn defaults_are_distinct() {
         let s = Shortcuts::from_settings(&BTreeMap::new());
@@ -279,7 +356,7 @@ mod tests {
     fn saved_shortcuts_round_trip_and_only_changes_are_saved() {
         let mut s = Shortcuts::from_settings(&BTreeMap::new());
         assert!(s.to_settings().is_empty());
-        s.set(Command::Refresh, 1, Some(Binding { ctrl: true, shift: true, alt: false, key: Key::ArrowDown }));
+        s.assign(Command::Refresh, 1, Some(Binding { ctrl: true, shift: true, alt: false, key: Key::ArrowDown }));
         let saved = s.to_settings();
         assert_eq!(saved["refresh"], vec!["F5".to_string(), "Ctrl+Shift+Down".to_string()]);
         assert_eq!(Shortcuts::from_settings(&saved), s);
@@ -288,19 +365,47 @@ mod tests {
     }
 
     #[test]
+    fn a_combination_moves_instead_of_being_shared() {
+        let mut s = Shortcuts::from_settings(&BTreeMap::new());
+        let r = Binding { ctrl: false, shift: false, alt: false, key: Key::R };
+        assert_eq!(s.assign(Command::Refresh, 0, Some(r)), vec![Command::MarkRead]);
+        assert_eq!(s.get(Command::MarkRead), [None, None]);
+        let mut events = vec![key(Key::R, false)];
+        assert_eq!(s.take_commands(&mut events, Focus::None), vec![Command::Refresh]);
+    }
+
+    #[test]
     fn labels_read_like_windows() {
         assert_eq!(Binding { ctrl: true, shift: true, alt: false, key: Key::P }.label(), "Ctrl+Maj+P");
         assert_eq!(Binding { ctrl: false, shift: false, alt: false, key: Key::Enter }.label(), "Entrée");
+        assert_eq!(Binding { ctrl: false, shift: false, alt: false, key: Key::PageDown }.label(), "Page suiv.");
+        assert_eq!(Binding { ctrl: false, shift: false, alt: false, key: Key::Backspace }.label(), "Retour arrière");
     }
 
     #[test]
     fn letters_stay_in_text_fields_while_typing() {
         let s = Shortcuts::from_settings(&BTreeMap::new());
         let mut events = vec![key(Key::R, false), key(Key::F, true)];
-        assert_eq!(s.take_commands(&mut events, true), vec![Command::Find]);
+        assert_eq!(s.take_commands(&mut events, Focus::Text), vec![Command::Find]);
         assert_eq!(events.len(), 1);
         let mut events = vec![key(Key::R, false)];
-        assert_eq!(s.take_commands(&mut events, false), vec![Command::MarkRead]);
+        assert_eq!(s.take_commands(&mut events, Focus::None), vec![Command::MarkRead]);
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn a_focused_button_keeps_enter_but_not_letters() {
+        let s = Shortcuts::from_settings(&BTreeMap::new());
+        let mut events = vec![key(Key::Enter, false), key(Key::E, false)];
+        assert_eq!(s.take_commands(&mut events, Focus::Widget), vec![Command::MarkDone]);
+        assert_eq!(events.len(), 1, "Entrée reste au bouton");
+    }
+
+    #[test]
+    fn held_keys_only_repeat_moves() {
+        let s = Shortcuts::from_settings(&BTreeMap::new());
+        let mut events = vec![key(Key::E, false), repeated(Key::E), repeated(Key::E), repeated(Key::J)];
+        assert_eq!(s.take_commands(&mut events, Focus::None), vec![Command::MarkDone, Command::Next]);
+        assert!(events.is_empty(), "les répétitions ignorées ne vont pas ailleurs");
     }
 }

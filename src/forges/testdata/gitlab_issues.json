@@ -1,0 +1,5 @@
+[
+  {"id": 7012, "iid": 12, "project_id": 9, "title": "Erreur à l'export", "description": "Plantage à l'export",
+   "web_url": "https://gitlab.com/northwind/app/-/issues/12", "author": {"username": "sam"},
+   "updated_at": "2026-10-17T07:00:00Z", "references": {"full": "northwind/app#12"}, "user_notes_count": 1}
+]

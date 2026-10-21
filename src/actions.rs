@@ -45,11 +45,13 @@ pub fn open_in_dragontree(exe: &Path, repo_dir: &Path) -> Result<(), String> {
         .map_err(|e| format!("Lancement de DragonTree impossible : {e}"))
 }
 
-/// Contexte collé dans la session Claude de *Corriger avec Claude* (jamais envoyé sans l'utilisateur).
+/// Contexte collé dans la session Claude de *Corriger avec Claude* (jamais envoyé sans l'utilisateur) : l'entrée,
+/// son lien, sa branche, les vérifications en échec et le début de la description.
 pub fn claude_context(item: &Item) -> String {
     let mut s = format!("{} — {}", item.kind.label(), item.title);
     if let Some(n) = item.number {
-        s.push_str(&format!(" ({}#{n})", item.repo));
+        let sep = if item.target.is_pull() && item.forge != crate::model::Forge::GitHub { '!' } else { '#' };
+        s.push_str(&format!(" ({}{sep}{n})", item.repo));
     }
     s.push_str(&format!("\nLien : {}", item.url));
     if let Some(branch) = &item.branch {
@@ -57,6 +59,9 @@ pub fn claude_context(item: &Item) -> String {
     }
     if item.ci == Some(Ci::Failure) {
         s.push_str("\nLa CI est en échec sur cette branche : trouve la cause et propose un correctif.");
+        for c in &item.checks {
+            s.push_str(&format!("\n- {} : {}", c.name, c.url));
+        }
     }
     if !item.summary.is_empty() {
         s.push_str(&format!("\nRésumé : {}", item.summary));
@@ -67,7 +72,7 @@ pub fn claude_context(item: &Item) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Forge, Kind};
+    use crate::model::{Check, Forge, Kind, Target};
 
     #[test]
     fn only_http_links_are_opened() {
@@ -82,7 +87,6 @@ mod tests {
     #[test]
     fn claude_context_carries_the_link_branch_and_failure() {
         let item = Item {
-            id: String::new(),
             forge: Forge::GitHub,
             kind: Kind::CiFailed,
             repo: "contoso/api".into(),
@@ -90,14 +94,23 @@ mod tests {
             title: "Corrige l'export".into(),
             url: "https://github.com/contoso/api/pull/138".into(),
             branch: Some("export".into()),
-            author: String::new(),
-            updated_at: 0,
             ci: Some(Ci::Failure),
-            summary: String::new(),
+            checks: vec![Check { name: "tests".into(), url: "https://github.com/contoso/api/runs/9".into() }],
+            target: Target::Pull,
+            ..Item::default()
         };
         let c = claude_context(&item);
         assert!(c.starts_with("CI en échec — Corrige l'export (contoso/api#138)"));
         assert!(c.contains("Branche : export"));
         assert!(c.contains("CI est en échec"));
+        assert!(c.contains("- tests : https://github.com/contoso/api/runs/9"));
+        let mr = Item {
+            forge: Forge::GitLab,
+            number: Some(4),
+            repo: "g/p".into(),
+            target: Target::GitLab { project_id: 1, iid: 4, mr: true },
+            ..Item::default()
+        };
+        assert!(claude_context(&mr).contains("(g/p!4)"));
     }
 }

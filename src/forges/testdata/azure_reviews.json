@@ -1,0 +1,11 @@
+{"count": 2, "value": [
+  {"pullRequestId": 81, "status": "active", "title": "Ajoute la pagination", "description": "Pagination des commandes",
+   "creationDate": "2026-10-19T08:00:00.1234567Z", "sourceRefName": "refs/heads/feature/pagination", "targetRefName": "refs/heads/main",
+   "createdBy": {"displayName": "Dominique Petit", "id": "22222222-0000-0000-0000-000000000000"},
+   "repository": {"id": "aaaa1111-0000-0000-0000-000000000000", "name": "api", "project": {"id": "p1", "name": "Ventes Web"}},
+   "reviewers": [{"id": "11111111-2222-3333-4444-555555555555", "displayName": "Camille Martin", "vote": 0}]},
+  {"pullRequestId": 82, "status": "active", "title": "Déjà relue", "creationDate": "2026-10-18T08:00:00Z",
+   "sourceRefName": "refs/heads/doc", "createdBy": {"displayName": "Sam Bernard"},
+   "repository": {"id": "aaaa1111-0000-0000-0000-000000000000", "name": "api", "project": {"name": "Ventes Web"}},
+   "reviewers": [{"id": "11111111-2222-3333-4444-555555555555", "vote": 10}]}
+]}

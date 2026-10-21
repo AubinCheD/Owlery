@@ -1,0 +1,7 @@
+[
+  {"id": 5, "body": "Dernier avis", "system": false, "author": {"username": "dominique"}, "created_at": "2026-10-20T08:00:00Z"},
+  {"id": 4, "body": "a ajouté 1 commit", "system": true, "author": {"username": "camille"}, "created_at": "2026-10-20T07:00:00Z"},
+  {"id": 3, "body": "Deuxième avis", "system": false, "author": {"username": "alex"}, "created_at": "2026-10-19T08:00:00Z"},
+  {"id": 2, "body": "Premier avis", "system": false, "author": {"username": "sam"}, "created_at": "2026-10-18T08:00:00Z"},
+  {"id": 1, "body": "Ancien avis", "system": false, "author": {"username": "sam"}, "created_at": "2026-10-17T08:00:00Z"}
+]

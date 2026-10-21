@@ -1,0 +1,6 @@
+{"count": 1, "value": [
+  {"id": 1203, "rev": 4, "fields": {
+    "System.Title": "Erreur à l'export", "System.TeamProject": "Ventes Web", "System.WorkItemType": "Bug",
+    "System.ChangedDate": "2026-10-20T07:30:00.57Z", "System.CreatedBy": {"displayName": "Sam Bernard", "uniqueName": "sam@fabrikam.test"},
+    "System.Description": "<div>Plantage quand on <b>exporte</b></div>"}}
+]}

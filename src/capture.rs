@@ -24,6 +24,10 @@ pub fn poll(ctx: &egui::Context, target: Option<&PathBuf>) {
     }
     let path = path.clone();
     ctx.request_screenshot(move |img| {
+        // Fenêtre réduite : image vide, rien à écrire.
+        if img.size[0] == 0 || img.size[1] == 0 {
+            return;
+        }
         // Écrite à côté puis renommée : qui attend l'image ne la lit jamais à moitié.
         let tmp = path.with_extension("tmp");
         let written = std::fs::write(&tmp, png(img.size[0] as u32, img.size[1] as u32, img.as_raw()))

@@ -1,0 +1,7 @@
+{"count": 1, "value": [
+  {"pullRequestId": 77, "status": "active", "title": "Corrige l'export CSV", "description": "",
+   "creationDate": "2026-10-18T10:00:00Z", "sourceRefName": "refs/heads/export-csv",
+   "createdBy": {"displayName": "Camille Martin"},
+   "repository": {"id": "aaaa1111-0000-0000-0000-000000000000", "name": "api", "project": {"name": "Ventes Web"}},
+   "reviewers": []}
+]}

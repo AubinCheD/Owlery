@@ -1,0 +1,6 @@
+[
+  {"id": 9042, "iid": 42, "project_id": 7, "title": "Ajoute la pagination", "description": "Pagination des résultats\n\nDétails",
+   "state": "opened", "web_url": "https://gitlab.com/contoso/api/-/merge_requests/42", "source_branch": "pagination",
+   "author": {"username": "dominique", "name": "Dominique Petit"}, "updated_at": "2026-10-20T08:30:00.000Z",
+   "references": {"short": "!42", "full": "contoso/api!42"}, "user_notes_count": 4}
+]

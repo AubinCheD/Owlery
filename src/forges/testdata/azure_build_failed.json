@@ -1,0 +1,4 @@
+{"count": 1, "value": [
+  {"id": 501, "status": "completed", "result": "failed", "definition": {"id": 3, "name": "api-ci"},
+   "_links": {"web": {"href": "https://dev.azure.com/fabrikam/Ventes%20Web/_build/results?buildId=501"}}}
+]}

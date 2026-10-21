@@ -75,3 +75,44 @@ Premier jet accepté par la session pilote (dépôt vérifié, 32 tests au vert,
   dans le design §2.8 ; à relire.
 - **Exécution** : Claude exécute le plan lui-même dans la session, puis un relecteur neuf relit
   toute la branche (choix de Claude : les tâches partagent `app.rs` et le modèle, et se suivent).
+
+### Revue du premier jet
+
+Un relecteur neuf (sous-agent, lecture seule) a relu tout le premier jet : 24 points. Décisions :
+
+| # | Point | Suite |
+|---|---|---|
+| 1 | État illisible (verrouillé, droits) écrasé à la première lecture | corrigé : rien n'est écrit tant que l'état n'a été ni lu ni mis de côté |
+| 2 | Deux instances écrivent le même `state.json` | corrigé : verrou `state.lock`, instance unique, second lancement → `afficher` |
+| 3 | Clic sur le texte d'une ligne sans effet (libellés sélectionnables) | corrigé, et test d'interface |
+| 4 | Identifiant d'une de mes PR qui change avec sa CI | corrigé : identifiants sans le type (état version 2, migration de la 0.1.0) |
+| 5 | Même PR en double (revue et mention) | corrigé : une entrée par identifiant, le type le plus utile |
+| 6 | Une recherche en échec fait tout échouer ; `mentions:@me` sans `is:` | mentions scindées en `is:pr` et `is:issue` ; un échec garde le cache du compte (décision : pas de fusion partielle) |
+| 7 | CI de mes PR non lue au-delà de 30 relectures | corrigé : budget séparé, mes PR d'abord |
+| 8 | Spinner infini (fil qui panique), `gh` sans délai | corrigé : `catch_unwind`, `gh` arrêté après 60 s |
+| 9 | Mes propres actions remettent en non lu | corrigé : ouverture = vu jusqu'à maintenant ; mon dernier commentaire ne compte pas ; mes PR suivent un compteur d'activité (commentaires, revues des autres), pas mes poussées |
+| 10 | « Rien ne vous attend » après une erreur | corrigé : écran d'erreur avec *Réessayer* et *Comptes…* |
+| 11 | Sélection au clavier sans défilement | corrigé : défilement et ouverture du groupe |
+| 12 | Fond peint par-dessus le texte | corrigé : fond réservé avant le contenu |
+| 13 | Raccourcis à une touche morts après un Tab | corrigé : seuls les champs de texte gardent les lettres, un bouton garde Entrée et Espace |
+| 14 | Répétition de touche qui termine plusieurs entrées | corrigé : seuls les déplacements se répètent |
+| 15 | Toasts d'échec d'enregistrement empilés | corrigé : un bandeau, nouvel essai toutes les 30 s |
+| 16 | Champs inconnus perdus au-delà du premier niveau | corrigé : champs inconnus gardés dans les réglages, comptes, entrées et choix ; entrées illisibles gardées telles quelles |
+| 17 | Sélection restée sur une entrée masquée par le filtre | corrigé |
+| 18 | Raccourci en double qui ne marche que pour une commande | corrigé : la combinaison passe à la nouvelle commande, l'ancienne la perd (dit) ; saisie annulée par un clic ailleurs |
+| 19 | Actualiser pendant une lecture ignoré | corrigé : la demande est gardée |
+| 20 | Message d'état sous les boutons, titres qui débordent | corrigé |
+| 21 | Listes tronquées en silence | signalé (« 50 affichées sur 132 ») ; pas de pagination (choix de Claude) |
+| 22 | Démo : choix perdus à chaque relance | corrigé : dates fixes dans la journée |
+| 23 | Noms de touches en anglais | corrigé ; les flèches deviennent « Flèche bas »… (glyphes absents des polices, vu par un test) |
+| 24 | Capture 0×0 (fenêtre réduite) qui ferait planter | corrigé : image vide ignorée |
+
+### Ce qui a été fait (0.2.0)
+
+- Les tâches 1 et 3 à 11 du plan sont arrivées dans un même commit : le modèle (identifiants sans
+  type) et l'interface ont été refaits d'un bloc, et des étapes intermédiaires n'auraient pas compilé.
+- Accessibilité : la liste déroulante des forges n'avait pas de nom (vu par egui_kittest), corrigé.
+- Essais : 117 tests (logique, forges sur réponses fictives, vrai canal nommé de test, interface
+  egui_kittest) ; démonstration capturée ; second lancement vérifié (il passe la main en 0,1 s).
+- Non vérifié : GitHub, GitLab et Azure DevOps réels (point 1, plus tard) ; la bulle de notification
+  et le clic dessus (l'écran du poste est en veille).

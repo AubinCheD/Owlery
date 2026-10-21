@@ -3,8 +3,6 @@
 
 /// Nom du service dans le Gestionnaire d'identifiants.
 pub const SERVICE: &str = "Owlery";
-/// Utilisateur du jeton GitHub dans le coffre.
-pub const GITHUB_TOKEN: &str = "github:token";
 
 /// Un coffre de secrets : celui de l'OS, ou un faux pour les tests.
 pub trait SecretStore: Send + Sync {
@@ -77,10 +75,10 @@ mod tests {
     #[test]
     fn tokens_are_trimmed_and_empty_ones_refused() {
         let store = MemoryStore::default();
-        assert!(store_token(&store, GITHUB_TOKEN, "  \n").is_err());
-        store_token(&store, GITHUB_TOKEN, " ghp_fictif \n").unwrap();
-        assert_eq!(store.get(GITHUB_TOKEN).unwrap().as_deref(), Some("ghp_fictif"));
-        store.delete(GITHUB_TOKEN).unwrap();
-        assert_eq!(store.get(GITHUB_TOKEN).unwrap(), None);
+        assert!(store_token(&store, "account:test", "  \n").is_err());
+        store_token(&store, "account:test", " ghp_fictif \n").unwrap();
+        assert_eq!(store.get("account:test").unwrap().as_deref(), Some("ghp_fictif"));
+        store.delete("account:test").unwrap();
+        assert_eq!(store.get("account:test").unwrap(), None);
     }
 }

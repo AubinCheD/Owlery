@@ -1,195 +1,601 @@
-//! L'application : barre d'outils, filtres, liste groupée, détail et actions, dialogues (jeton, réglages,
-//! palette).
+//! L'application : état, lectures en arrière-plan (une par compte), commandes, notifications, liens avec
+//! Windows et les autres applications. L'affichage est dans `ui`.
 
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::mpsc::{Receiver, channel};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use eframe::egui::{self, Color32, RichText};
+use eframe::egui;
 
-use crate::actions;
-use crate::github::{self, FetchError};
-use crate::inbox::{Filter, GroupBy, Snooze};
-use crate::model::{Ci, Forge, Item, Kind, Status};
-use crate::secrets::{self, GITHUB_TOKEN, SecretStore};
-use crate::shortcuts::{Binding, Command, Shortcuts};
-use crate::state::{self, AppState, ThemeChoice};
+use crate::contract::{self, Incoming, Snapshot};
+use crate::forges::{self, Account, FetchError, Fetched, Fetcher, Identity, Seen};
+use crate::inbox::{GroupBy, Rules, Snooze, Undo};
+use crate::model::{Comment, Item, Kind, Status, Target};
+use crate::secrets::SecretStore;
+use crate::shortcuts::{Command, Focus, Shortcuts};
+use crate::state::{self, AppState, ThemeChoice, WindowState};
 
-/// Page de création d'un jeton à grain fin.
-const TOKEN_PAGE: &str = "https://github.com/settings/personal-access-tokens/new";
-/// Page d'installation de la CLI gh.
-const GH_PAGE: &str = "https://cli.github.com/";
+/// Commentaires en cours de lecture : entrée, état vu, réponse attendue.
+type CommentJob = (String, i64, Receiver<Result<Vec<Comment>, FetchError>>);
 
-type FetchResult = Result<(Vec<Item>, &'static str), FetchError>;
+/// Nombre de changements qu'on peut annuler.
+const UNDO_DEPTH: usize = 50;
+/// Attente du canal de Fawkes après l'avoir démarré.
+const FAWKES_START_WAIT: Duration = Duration::from_secs(20);
+
+/// Lien vers Fawkes par le contrat local (réel : canal nommé ; tests : faux).
+pub trait FawkesLink: Send + Sync {
+    /// Fawkes écoute-t-il sur son canal ?
+    fn available(&self) -> bool;
+    /// Envoie une demande (une ligne JSON) et renvoie la réponse.
+    fn send(&self, line: &str) -> Result<String, String>;
+    /// `fawkes.exe` : celui des réglages, sinon celui du PATH.
+    fn find_exe(&self, configured: &str) -> Option<PathBuf>;
+    /// Démarre Fawkes, sans argument (il ne connaît pas encore de demande en ligne de commande).
+    fn start(&self, exe: &Path) -> Result<(), String>;
+}
+
+/// Notifications Windows (réel : zone de notification ; tests : rien).
+pub trait Notifier: Send + Sync {
+    fn show(&self, title: &str, body: &str);
+    fn hide(&self);
+}
+
+/// Pas de Fawkes (tests, autres systèmes).
+pub struct NoFawkes;
+
+impl FawkesLink for NoFawkes {
+    fn available(&self) -> bool {
+        false
+    }
+    fn send(&self, _line: &str) -> Result<String, String> {
+        Err("Fawkes n'est pas joignable".into())
+    }
+    fn find_exe(&self, _configured: &str) -> Option<PathBuf> {
+        None
+    }
+    fn start(&self, _exe: &Path) -> Result<(), String> {
+        Err("Fawkes n'est pas disponible".into())
+    }
+}
+
+/// Pas de notifications (tests).
+pub struct NoNotifier;
+
+impl Notifier for NoNotifier {
+    fn show(&self, _title: &str, _body: &str) {}
+    fn hide(&self) {}
+}
+
+/// Dépendances de l'application, fournies par `main` (ou par les tests).
+pub struct StartOptions {
+    pub dir: PathBuf,
+    pub store: Arc<dyn SecretStore>,
+    pub fetcher: Arc<dyn Fetcher>,
+    pub demo: bool,
+    pub capture: Option<PathBuf>,
+    /// Demandes reçues sur le canal d'Owlery.
+    pub incoming: Option<Receiver<Incoming>>,
+    /// Ce que l'interface publie pour répondre au canal sans l'attendre.
+    pub snapshot: Arc<Mutex<Snapshot>>,
+    pub fawkes: Arc<dyn FawkesLink>,
+    pub notifier: Arc<dyn Notifier>,
+    /// Faux si l'état ne doit pas être écrit (illisible, ou tenu par une autre instance).
+    pub writable: bool,
+    /// Lancer une lecture au démarrage.
+    pub fetch_on_start: bool,
+}
+
+impl StartOptions {
+    /// Options d'essai : dossier donné, rien de Windows, pas de lecture au démarrage.
+    pub fn for_tests(dir: PathBuf, store: Arc<dyn SecretStore>, fetcher: Arc<dyn Fetcher>) -> Self {
+        StartOptions {
+            dir,
+            store,
+            fetcher,
+            demo: false,
+            capture: None,
+            incoming: None,
+            snapshot: Arc::new(Mutex::new(Snapshot::default())),
+            fawkes: Arc::new(NoFawkes),
+            notifier: Arc::new(NoNotifier),
+            writable: true,
+            fetch_on_start: false,
+        }
+    }
+}
+
+/// État de la dernière lecture d'un compte.
+#[derive(Debug, Clone, Default)]
+pub struct AccountStatus {
+    pub last_ok: Option<i64>,
+    pub error: Option<FetchError>,
+    pub notes: Vec<String>,
+    /// Pas de lecture automatique avant (quota épuisé), en secondes Unix.
+    pub hold_until: Option<i64>,
+}
+
+/// Commentaires d'une entrée, lus à la demande.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CommentsState {
+    Loading,
+    Loaded(Vec<Comment>),
+    Failed(String),
+}
+
+/// Dialogue d'ajout d'un compte.
+pub struct AccountDraft {
+    pub forge: crate::model::Forge,
+    pub host: String,
+    pub orgs: String,
+    pub token: String,
+    pub use_gh: bool,
+    pub checking: Option<Receiver<Result<Identity, FetchError>>>,
+    pub error: Option<String>,
+}
+
+/// *Corriger avec Claude* quand Fawkes n'écoute pas : démarrer Fawkes, copier le contexte, ou annuler.
+pub struct FawkesDialog {
+    pub id: String,
+    pub line: String,
+    pub context: String,
+}
 
 pub struct App {
-    dir: PathBuf,
-    st: AppState,
-    shortcuts: Shortcuts,
-    store: Arc<dyn SecretStore>,
-    /// Entrées fictives, aucune lecture réelle (`OWLERY_DEMO=1`).
-    demo: bool,
-    filter: Filter,
-    selected: Option<String>,
-    fetching: Option<Receiver<FetchResult>>,
-    last_fetch: Option<Instant>,
-    /// Pas de nouvelle lecture automatique avant (quota épuisé), en secondes Unix.
-    hold_until: Option<i64>,
-    status_line: String,
-    /// La dernière lecture a échoué faute d'accès : la liste affiche les deux façons d'en donner un.
-    no_access: bool,
-    problems: Vec<String>,
-    toasts: Vec<(String, Instant)>,
+    pub(crate) dir: PathBuf,
+    pub(crate) st: AppState,
+    pub(crate) writable: bool,
+    pub(crate) shortcuts: Shortcuts,
+    pub(crate) store: Arc<dyn SecretStore>,
+    pub(crate) fetcher: Arc<dyn Fetcher>,
+    pub(crate) demo: bool,
+    pub(crate) capture: Option<PathBuf>,
+    pub(crate) gh_available: bool,
+
+    pub(crate) selected: Option<String>,
+    pub(crate) scroll_to_selected: bool,
+    pub(crate) focus_search: bool,
+
+    fetch_tx: Sender<(String, Result<Fetched, FetchError>)>,
+    fetch_rx: Receiver<(String, Result<Fetched, FetchError>)>,
+    pub(crate) running: BTreeSet<String>,
+    pub(crate) status: BTreeMap<String, AccountStatus>,
+    last_cycle: Option<Instant>,
+    refresh_pending: bool,
+    /// Aucun compte à lire : l'écran d'accueil propose d'en ajouter un.
+    pub(crate) no_access: bool,
+    pending_arrivals: Vec<Item>,
+
+    pub(crate) comments: BTreeMap<String, (i64, CommentsState)>,
+    comment_job: Option<CommentJob>,
+
+    pub(crate) found_repos: BTreeMap<String, PathBuf>,
+    scan_job: Option<Receiver<BTreeMap<String, PathBuf>>>,
+    pub(crate) scanning: bool,
+
+    pub(crate) undo: Vec<Vec<Undo>>,
+    pub(crate) problems: Vec<String>,
+    pub(crate) toasts: Vec<(String, Instant)>,
     dirty: bool,
-    token_dialog: Option<TokenDialog>,
-    has_token: bool,
-    settings_open: bool,
-    /// Raccourci en cours de saisie dans les réglages.
-    capturing: Option<(Command, usize)>,
-    palette: Option<Palette>,
-    focus_search: bool,
-    capture: Option<PathBuf>,
+    last_save: Option<Instant>,
+    pub(crate) save_error: Option<String>,
+
+    pub(crate) accounts_open: bool,
+    pub(crate) draft: Option<AccountDraft>,
+    pub(crate) settings_open: bool,
+    pub(crate) capturing: Option<(Command, usize)>,
+    pub(crate) palette: Option<(String, usize)>,
+    pub(crate) fawkes_dialog: Option<FawkesDialog>,
+    pub(crate) fawkes_job: Option<Receiver<Result<String, String>>>,
+
+    incoming: Option<Receiver<Incoming>>,
+    snapshot: Arc<Mutex<Snapshot>>,
+    pub(crate) fawkes: Arc<dyn FawkesLink>,
+    notifier: Arc<dyn Notifier>,
+    revision: u64,
+    published: u64,
+    title_shown: Option<usize>,
+    window_known: bool,
+    focused: bool,
 }
 
-#[derive(Default)]
-struct TokenDialog {
-    input: String,
-    error: Option<String>,
-}
-
-#[derive(Default)]
-struct Palette {
-    query: String,
-    selected: usize,
-}
-
-fn now() -> i64 {
+pub(crate) fn now() -> i64 {
     chrono::Local::now().timestamp()
 }
 
 impl App {
-    pub fn new(
-        cc: &eframe::CreationContext<'_>,
-        dir: PathBuf,
-        loaded: state::Loaded,
-        store: Arc<dyn SecretStore>,
-        demo: bool,
-    ) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, opts: StartOptions, loaded: state::Loaded) -> Self {
+        let (fetch_tx, fetch_rx) = channel();
         let mut st = loaded.state;
-        if demo {
-            st.inbox.merge(Forge::GitHub, crate::demo::items(now()), now());
+        let mut problems = loaded.problems;
+        let mut toasts = Vec::new();
+        let mut dirty = false;
+        if opts.demo {
+            if st.settings.accounts.is_empty() {
+                st.settings.accounts = crate::demo::accounts();
+                dirty = true;
+            }
+        } else {
+            match forges::migrate_first_draft_token(opts.store.as_ref(), &mut st.settings.accounts) {
+                Ok(true) => {
+                    dirty = true;
+                    toasts.push((
+                        "Le jeton GitHub du premier jet a été repris dans un compte".to_string(),
+                        Instant::now(),
+                    ));
+                }
+                Ok(false) => {}
+                Err(e) => problems.push(format!("Reprise du jeton GitHub du premier jet impossible : {e}")),
+            }
         }
-        let has_token = matches!(store.get(GITHUB_TOKEN), Ok(Some(_)));
+        if !opts.writable && !problems.iter().any(|p| p.contains("rien ne sera enregistré")) {
+            problems.push("Rien ne sera enregistré pendant cette session (voir le message ci-dessus).".into());
+        }
         let mut app = App {
-            dir,
+            dir: opts.dir,
             shortcuts: Shortcuts::from_settings(&st.settings.shortcuts),
             st,
-            store,
-            demo,
-            filter: Filter::default(),
+            writable: opts.writable,
+            store: opts.store,
+            gh_available: opts.fetcher.gh_available(),
+            fetcher: opts.fetcher,
+            demo: opts.demo,
+            capture: opts.capture,
             selected: None,
-            fetching: None,
-            last_fetch: None,
-            hold_until: None,
-            status_line: String::new(),
+            scroll_to_selected: false,
+            focus_search: false,
+            fetch_tx,
+            fetch_rx,
+            running: BTreeSet::new(),
+            status: BTreeMap::new(),
+            last_cycle: None,
+            refresh_pending: false,
             no_access: false,
-            problems: loaded.problems,
-            toasts: Vec::new(),
-            dirty: demo,
-            token_dialog: None,
-            has_token,
+            pending_arrivals: Vec::new(),
+            comments: BTreeMap::new(),
+            comment_job: None,
+            found_repos: BTreeMap::new(),
+            scan_job: None,
+            scanning: false,
+            undo: Vec::new(),
+            problems,
+            toasts,
+            dirty,
+            last_save: None,
+            save_error: None,
+            accounts_open: false,
+            draft: None,
             settings_open: false,
             capturing: None,
             palette: None,
-            focus_search: false,
-            capture: crate::capture::target(),
+            fawkes_dialog: None,
+            fawkes_job: None,
+            incoming: opts.incoming,
+            snapshot: opts.snapshot,
+            fawkes: opts.fawkes,
+            notifier: opts.notifier,
+            revision: 1,
+            published: 0,
+            title_shown: None,
+            window_known: false,
+            focused: true,
         };
         apply_theme(&cc.egui_ctx, app.st.settings.theme);
-        if demo {
-            app.status_line = "Démonstration : entrées fictives, aucune lecture de GitHub".into();
-            app.last_fetch = Some(Instant::now());
-            app.selected = app.visible_ids().into_iter().next();
-        } else {
+        app.scan_repos();
+        if opts.fetch_on_start {
             app.refresh(&cc.egui_ctx);
+        } else {
+            app.no_access = app.accounts().is_empty();
+        }
+        if app.demo {
+            app.selected = app.visible_ids().into_iter().next();
         }
         app
     }
 
-    fn toast(&mut self, msg: impl Into<String>) {
+    pub(crate) fn toast(&mut self, msg: impl Into<String>) {
         self.toasts.push((msg.into(), Instant::now()));
+    }
+
+    pub(crate) fn changed(&mut self) {
+        self.dirty = true;
+        self.revision += 1;
+    }
+
+    pub(crate) fn rules(&self) -> &Rules {
+        &self.st.settings.rules
+    }
+
+    /// Comptes lus : ceux des réglages, et « GitHub par gh » s'il n'y a pas de compte GitHub.
+    pub(crate) fn accounts(&self) -> Vec<Account> {
+        forges::accounts_to_read(&self.st.settings.accounts, self.gh_available)
+    }
+
+    pub(crate) fn account_of(&self, item: &Item) -> Option<Account> {
+        let accounts = self.accounts();
+        accounts
+            .iter()
+            .find(|a| a.id == item.account)
+            .or_else(|| accounts.iter().find(|a| item.account.is_empty() && a.forge == item.forge))
+            .cloned()
+    }
+
+    pub(crate) fn host_of(&self, item: &Item) -> String {
+        self.account_of(item).map(|a| a.host).unwrap_or_else(|| item.forge.default_host().to_string())
     }
 
     // --- Lecture -----------------------------------------------------------------------------------------
 
-    fn refresh(&mut self, ctx: &egui::Context) {
-        if self.fetching.is_some() {
+    pub(crate) fn refresh(&mut self, ctx: &egui::Context) {
+        if !self.running.is_empty() {
+            // Une lecture est en cours : la demande est gardée, une nouvelle lecture suivra.
+            self.refresh_pending = true;
             return;
         }
-        if self.demo {
-            self.st.inbox.merge(Forge::GitHub, crate::demo::items(now()), now());
-            self.dirty = true;
-            self.toast("Démonstration : entrées fictives rechargées");
-            return;
+        self.refresh_pending = false;
+        self.last_cycle = Some(Instant::now());
+        self.gh_available = self.fetcher.gh_available();
+        let accounts = self.accounts();
+        self.no_access = accounts.is_empty();
+        let now = now();
+        for account in accounts {
+            if self.status.get(&account.id).and_then(|s| s.hold_until).is_some_and(|t| now < t) {
+                continue;
+            }
+            let seen: Seen = self
+                .st
+                .inbox
+                .items
+                .values()
+                .filter(|i| i.account == account.id)
+                .filter_map(|i| {
+                    let m = self.st.inbox.marks.get(&i.id)?;
+                    matches!(m.status, Status::Read | Status::Done).then(|| (i.id.clone(), m.seen_updated_at))
+                })
+                .collect();
+            let (tx, fetcher, ctx) = (self.fetch_tx.clone(), self.fetcher.clone(), ctx.clone());
+            self.running.insert(account.id.clone());
+            std::thread::spawn(move || {
+                // Une panique dans la lecture ne doit pas laisser l'interface attendre pour toujours.
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fetcher.fetch(&account, &seen)))
+                    .unwrap_or_else(|_| Err(FetchError::Network("lecture interrompue par une erreur interne".into())));
+                let _ = tx.send((account.id.clone(), result));
+                ctx.request_repaint();
+            });
         }
-        let (tx, rx) = channel();
-        let store = self.store.clone();
-        let ctx = ctx.clone();
-        std::thread::spawn(move || {
-            let result =
-                github::access(store.as_ref()).and_then(|t| github::fetch(t.as_ref()).map(|items| (items, t.label())));
-            let _ = tx.send(result);
-            ctx.request_repaint();
-        });
-        self.fetching = Some(rx);
-        self.last_fetch = Some(Instant::now());
-        self.status_line = "Lecture de GitHub…".into();
     }
 
-    fn poll_fetch(&mut self) {
-        let Some(rx) = &self.fetching else { return };
-        let Ok(result) = rx.try_recv() else { return };
-        self.fetching = None;
-        let at = chrono::Local::now().format("%H:%M");
-        match result {
-            Ok((items, via)) => {
-                let n = items.len();
-                self.st.inbox.merge(Forge::GitHub, items, now());
-                self.dirty = true;
-                self.no_access = false;
-                self.hold_until = None;
-                self.status_line = format!("GitHub lu à {at} ({n} entrée(s), accès : {via})");
-            }
-            Err(e) => {
-                // Rien n'est effacé : la liste en cache reste affichée.
-                self.no_access = e == FetchError::NoAccess;
-                if let FetchError::RateLimited { reset } = e {
-                    self.hold_until = Some(reset.unwrap_or(now() + 15 * 60));
+    fn poll_fetches(&mut self, ctx: &egui::Context) {
+        let now = now();
+        while let Ok((id, result)) = self.fetch_rx.try_recv() {
+            self.running.remove(&id);
+            let Some(account) = self.accounts().into_iter().find(|a| a.id == id) else { continue };
+            let status = self.status.entry(id.clone()).or_default();
+            match result {
+                Ok(fetched) => {
+                    status.last_ok = Some(now);
+                    status.error = None;
+                    status.hold_until = None;
+                    status.notes = fetched.notes;
+                    let merged = self.st.inbox.merge(&id, account.forge, fetched.items, now);
+                    let s = &self.st.settings;
+                    self.pending_arrivals.extend(crate::notify::arrivals(
+                        &merged.before_unread,
+                        merged.first_fetch,
+                        &self.st.inbox,
+                        &id,
+                        &s.notify_kinds,
+                        &s.rules,
+                        now,
+                    ));
+                    self.changed();
                 }
-                self.status_line = if self.no_access {
-                    "Aucun accès à GitHub".into()
-                } else {
-                    format!("Lecture de {at} en échec : {e}")
-                };
+                Err(e) => {
+                    if let FetchError::RateLimited { reset } = e {
+                        status.hold_until = Some(reset.unwrap_or(now + 15 * 60));
+                    }
+                    // Rien n'est effacé : les entrées en cache du compte restent affichées.
+                    status.error = Some(e);
+                }
+            }
+        }
+        if self.running.is_empty() {
+            if self.demo && self.selected.is_none() {
+                // Démonstration : une entrée choisie d'emblée, pour montrer le détail.
+                self.selected = self.visible_ids().into_iter().next();
+            }
+            if !self.pending_arrivals.is_empty() {
+                let arrivals = std::mem::take(&mut self.pending_arrivals);
+                self.notify(&arrivals, &[]);
+            }
+            if self.refresh_pending {
+                self.refresh(ctx);
             }
         }
     }
 
     fn auto_refresh(&mut self, ctx: &egui::Context) {
         let minutes = self.st.settings.refresh_minutes;
-        if minutes == 0 || self.demo || self.fetching.is_some() || self.hold_until.is_some_and(|t| now() < t) {
+        if minutes == 0 || !self.running.is_empty() {
             return;
         }
-        if self.last_fetch.is_none_or(|t| t.elapsed() >= Duration::from_secs(u64::from(minutes) * 60)) {
+        if self.last_cycle.is_none_or(|t| t.elapsed() >= Duration::from_secs(u64::from(minutes) * 60)) {
             self.refresh(ctx);
         }
     }
 
-    // --- Actions sur les entrées ---------------------------------------------------------------------
+    /// Reports arrivés à échéance : ils reviennent en non lu, avec une notification « Rappel ».
+    fn due_snoozes(&mut self) {
+        let due = self.st.inbox.take_due_snoozes(now());
+        if due.is_empty() {
+            return;
+        }
+        let items: Vec<Item> = due.iter().filter_map(|id| self.st.inbox.items.get(id).cloned()).collect();
+        self.changed();
+        self.notify(&[], &items);
+    }
 
-    fn visible_ids(&self) -> Vec<String> {
-        let view = self.st.inbox.view(&self.filter, self.st.settings.group_by, now());
+    fn notify(&mut self, arrivals: &[Item], reminders: &[Item]) {
+        if !self.st.settings.notify || self.focused {
+            return;
+        }
+        if let Some((title, body)) = crate::notify::message(arrivals, reminders) {
+            self.notifier.show(&title, &body);
+        }
+    }
+
+    // --- Commentaires, dépôts locaux --------------------------------------------------------------------
+
+    /// Lit les derniers commentaires de l'entrée sélectionnée, s'ils ne sont pas déjà en mémoire pour son état.
+    fn ensure_comments(&mut self, ctx: &egui::Context) {
+        if let Some((id, at, rx)) = &self.comment_job {
+            match rx.try_recv() {
+                Ok(result) => {
+                    let state = match result {
+                        Ok(list) => CommentsState::Loaded(list),
+                        Err(e) => CommentsState::Failed(e.to_string()),
+                    };
+                    self.comments.insert(id.clone(), (*at, state));
+                    self.comment_job = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.comments.insert(id.clone(), (*at, CommentsState::Failed("lecture interrompue".into())));
+                    self.comment_job = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            }
+        }
+        let Some(item) = self.selected.as_ref().and_then(|id| self.st.inbox.items.get(id)).cloned() else { return };
+        let wanted = !matches!(item.target, Target::Unknown)
+            && (item.comments > 0 || matches!(item.target, Target::Azure { .. }) || self.demo);
+        if !wanted || self.comments.get(&item.id).is_some_and(|(at, _)| *at == item.updated_at) {
+            return;
+        }
+        let Some(account) = self.account_of(&item) else { return };
+        let (tx, rx) = channel();
+        let (fetcher, ctx) = (self.fetcher.clone(), ctx.clone());
+        let for_thread = item.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(fetcher.comments(&account, &for_thread));
+            ctx.request_repaint();
+        });
+        self.comments.insert(item.id.clone(), (item.updated_at, CommentsState::Loading));
+        self.comment_job = Some((item.id, item.updated_at, rx));
+    }
+
+    /// Parcourt les dossiers racines des réglages, en arrière-plan.
+    pub(crate) fn scan_repos(&mut self) {
+        let roots: Vec<PathBuf> =
+            self.st.settings.repo_roots.iter().filter(|r| !r.trim().is_empty()).map(PathBuf::from).collect();
+        if roots.is_empty() {
+            self.found_repos.clear();
+            return;
+        }
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::localrepo::scan(&roots, 3));
+        });
+        self.scan_job = Some(rx);
+        self.scanning = true;
+    }
+
+    fn poll_scan(&mut self) {
+        let Some(rx) = &self.scan_job else { return };
+        if let Ok(found) = rx.try_recv() {
+            self.found_repos = found;
+            self.scan_job = None;
+            self.scanning = false;
+        }
+    }
+
+    /// Dossier local d'une entrée : celui choisi à la main, sinon celui trouvé dans les dossiers racines.
+    pub(crate) fn local_dir(&self, item: &Item) -> Option<PathBuf> {
+        crate::localrepo::local_dir(item, &self.host_of(item), &self.st.settings.repo_dirs, &self.found_repos)
+    }
+
+    // --- Corriger avec Claude -------------------------------------------------------------------------
+
+    pub(crate) fn fix_with_claude(&mut self, ctx: &egui::Context, id: &str) {
+        let Some(item) = self.st.inbox.items.get(id).cloned() else { return };
+        let Some(dir) = self.local_dir(&item) else {
+            self.toast("Choisissez d'abord le dossier local du dépôt");
+            return;
+        };
+        let context = crate::actions::claude_context(&item);
+        let title = match item.number {
+            Some(n) => format!("{} #{n}", item.repo),
+            None => item.repo.clone(),
+        };
+        let line = contract::fawkes_open(&dir, &title, item.branch.as_deref(), &context);
+        if self.fawkes.available() {
+            self.send_to_fawkes(ctx, line, false);
+        } else {
+            self.fawkes_dialog = Some(FawkesDialog { id: id.to_string(), line, context });
+        }
+    }
+
+    /// Envoie la demande à Fawkes en arrière-plan ; `start` : le démarrer d'abord et attendre son canal.
+    pub(crate) fn send_to_fawkes(&mut self, ctx: &egui::Context, line: String, start: bool) {
+        let exe = if start {
+            match self.fawkes.find_exe(&self.st.settings.fawkes_exe) {
+                Some(exe) => Some(exe),
+                None => {
+                    self.toast("fawkes.exe introuvable : indiquez son chemin dans les réglages");
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        let (tx, rx) = channel();
+        let (fawkes, ctx) = (self.fawkes.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let result = (|| {
+                if let Some(exe) = exe {
+                    fawkes.start(&exe)?;
+                    let deadline = Instant::now() + FAWKES_START_WAIT;
+                    while !fawkes.available() {
+                        if Instant::now() > deadline {
+                            return Err("Fawkes ne reçoit pas encore de demandes (pas de canal après 20 s)".to_string());
+                        }
+                        std::thread::sleep(Duration::from_millis(500));
+                    }
+                }
+                fawkes.send(&line)
+            })();
+            let _ = tx.send(result);
+            ctx.request_repaint();
+        });
+        self.fawkes_job = Some(rx);
+    }
+
+    fn poll_fawkes(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.fawkes_job else { return };
+        let Ok(result) = rx.try_recv() else { return };
+        self.fawkes_job = None;
+        match result.and_then(|reply| contract::parse_reply(&reply)) {
+            Ok(()) => self.toast("Fawkes ouvre une session Claude (consigne collée, pas envoyée)"),
+            Err(e) => {
+                if let Some(item) = self.selected.as_ref().and_then(|id| self.st.inbox.items.get(id)) {
+                    ctx.copy_text(crate::actions::claude_context(item));
+                }
+                self.toast(format!("Fawkes : {e}. Contexte copié dans le presse-papiers à la place."));
+            }
+        }
+    }
+
+    // --- Entrées --------------------------------------------------------------------------------------
+
+    pub(crate) fn visible_ids(&self) -> Vec<String> {
+        let view = self.st.inbox.view(&self.st.view, self.rules(), self.st.settings.group_by, now());
         view.iter().flat_map(|g| g.entries.iter().map(|(i, _)| i.id.clone())).collect()
+    }
+
+    pub(crate) fn select(&mut self, id: Option<String>) {
+        self.selected = id;
+        self.scroll_to_selected = true;
     }
 
     fn select_step(&mut self, step: isize) {
@@ -202,35 +608,91 @@ impl App {
             None => 0,
             Some(p) => (p as isize + step).clamp(0, ids.len() as isize - 1) as usize,
         };
-        self.selected = Some(ids[next].clone());
+        self.select(Some(ids[next].clone()));
     }
 
-    fn set_status(&mut self, id: &str, status: Status) {
-        // Une entrée qui quitte la liste : la sélection passe à la suivante.
-        let hides = matches!(status, Status::Done | Status::Snoozed { .. }) && !self.filter.show_hidden;
-        if hides && self.selected.as_deref() == Some(id) {
-            let ids = self.visible_ids();
-            let pos = ids.iter().position(|i| i == id);
-            self.selected =
-                pos.and_then(|p| ids.get(p + 1).or_else(|| p.checked_sub(1).and_then(|q| ids.get(q)))).cloned();
+    /// Change l'état d'entrées (annulable d'un coup). Une entrée sélectionnée qui quitte la liste passe la
+    /// sélection à sa voisine.
+    pub(crate) fn set_status_many(&mut self, ids: &[String], status: Status, seen_at: Option<i64>) {
+        if let Some(sel) = self.selected.clone()
+            && ids.contains(&sel)
+            && !self.st.inbox.would_show(&self.st.view, self.rules(), &sel, status)
+        {
+            let visible = self.visible_ids();
+            let pos = visible.iter().position(|i| *i == sel);
+            let next = pos.and_then(|p| {
+                visible[p + 1..].iter().chain(visible[..p].iter().rev()).find(|i| !ids.contains(i)).cloned()
+            });
+            self.select(next);
         }
-        self.st.inbox.set_status(id, status);
-        self.dirty = true;
+        let undos: Vec<Undo> = ids.iter().filter_map(|id| self.st.inbox.set_status(id, status, seen_at)).collect();
+        if undos.is_empty() {
+            return;
+        }
+        self.undo.push(undos);
+        if self.undo.len() > UNDO_DEPTH {
+            self.undo.remove(0);
+        }
+        self.changed();
     }
 
-    fn open(&mut self, id: &str) {
+    pub(crate) fn set_status(&mut self, id: &str, status: Status) {
+        self.set_status_many(&[id.to_string()], status, None);
+    }
+
+    pub(crate) fn undo_last(&mut self) {
+        let Some(group) = self.undo.pop() else {
+            self.toast("Rien à annuler");
+            return;
+        };
+        let n = group.len();
+        for u in group.into_iter().rev() {
+            self.st.inbox.restore(u);
+        }
+        self.changed();
+        self.toast(if n == 1 { "Annulé".to_string() } else { format!("Annulé ({n} entrées)") });
+    }
+
+    /// Marque lues les entrées non lues de la liste affichée (ou d'un groupe).
+    pub(crate) fn mark_read(&mut self, ids: Vec<String>) {
+        let unread: Vec<String> = ids
+            .into_iter()
+            .filter(|id| self.st.inbox.items.get(id).is_some_and(|i| self.st.inbox.status(i, now()) == Status::Unread))
+            .collect();
+        if unread.is_empty() {
+            return;
+        }
+        let n = unread.len();
+        self.set_status_many(&unread, Status::Read, None);
+        if n > 1 {
+            let undo = self.shortcuts.label(Command::Undo);
+            self.toast(format!("{n} entrées marquées lues ({undo} pour annuler)"));
+        }
+    }
+
+    pub(crate) fn open(&mut self, id: &str) {
         let Some(url) = self.st.inbox.items.get(id).map(|i| i.url.clone()) else { return };
-        match actions::open_url(&url) {
+        match crate::actions::open_url(&url) {
             Ok(()) => {
-                if self.st.inbox.status(&self.st.inbox.items[id], now()) == Status::Unread {
-                    self.set_status(id, Status::Read);
+                if self.st.inbox.items.get(id).is_some_and(|i| self.st.inbox.status(i, now()) == Status::Unread) {
+                    // Ouverte maintenant : ce qui s'est passé avant est vu.
+                    self.set_status_many(&[id.to_string()], Status::Read, Some(now()));
                 }
             }
             Err(e) => self.toast(e),
         }
     }
 
-    fn run(&mut self, ctx: &egui::Context, cmd: Command) {
+    pub(crate) fn mute_repo(&mut self, repo: &str) {
+        self.st.settings.rules.muted_repos.insert(repo.to_string());
+        if self.selected.as_ref().and_then(|id| self.st.inbox.items.get(id)).is_some_and(|i| i.repo == repo) {
+            self.select(None);
+        }
+        self.changed();
+        self.toast(format!("Dépôt ignoré : {repo} (réglages pour le rétablir)"));
+    }
+
+    pub(crate) fn run(&mut self, ctx: &egui::Context, cmd: Command) {
         let sel = self.selected.clone();
         match cmd {
             Command::Refresh => self.refresh(ctx),
@@ -261,16 +723,27 @@ impl App {
                     self.set_status(&id, Status::Snoozed { until: Snooze::Tomorrow.until(now()) });
                 }
             }
+            Command::MarkAllRead => {
+                let ids = self.visible_ids();
+                self.mark_read(ids);
+            }
+            Command::Undo => self.undo_last(),
             Command::Find => self.focus_search = true,
             Command::ToggleGroupBy => {
                 self.st.settings.group_by = match self.st.settings.group_by {
                     GroupBy::Repo => GroupBy::Kind,
                     GroupBy::Kind => GroupBy::Repo,
                 };
-                self.dirty = true;
+                self.changed();
             }
-            Command::WaitingOnly => self.filter.waiting_only = !self.filter.waiting_only,
-            Command::Palette => self.palette = Some(Palette::default()),
+            Command::WaitingOnly => {
+                self.st.view.waiting_only = !self.st.view.waiting_only;
+                self.changed();
+            }
+            Command::Palette => {
+                self.palette = if self.palette.is_some() { None } else { Some((String::new(), 0)) };
+            }
+            Command::Accounts => self.accounts_open = !self.accounts_open,
             Command::Settings => self.settings_open = !self.settings_open,
         }
     }
@@ -279,619 +752,164 @@ impl App {
         if self.capturing.is_some() {
             return;
         }
-        let typing = ctx.egui_wants_keyboard_input();
-        let modal = self.palette.is_some() || self.token_dialog.is_some();
-        let cmds = ctx.input_mut(|i| self.shortcuts.take_commands(&mut i.events, typing || modal));
+        let modal = self.palette.is_some() || self.draft.is_some() || self.fawkes_dialog.is_some();
+        let focus = if modal {
+            Focus::Modal
+        } else if ctx.text_edit_focused() {
+            Focus::Text
+        } else if ctx.memory(|m| m.focused().is_some()) {
+            Focus::Widget
+        } else {
+            Focus::None
+        };
+        let cmds = ctx.input_mut(|i| self.shortcuts.take_commands(&mut i.events, focus));
         for cmd in cmds {
-            if !modal || cmd == Command::Palette {
+            if !modal || cmd == Command::Palette && self.palette.is_some() {
                 self.run(ctx, cmd);
             }
         }
     }
 
-    fn save(&mut self) {
-        if !self.dirty {
+    // --- Demandes reçues, publication, fenêtre -------------------------------------------------------
+
+    fn poll_incoming(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.incoming else { return };
+        let requests: Vec<Incoming> = rx.try_iter().collect();
+        for req in requests {
+            match req {
+                Incoming::Show { kind } => {
+                    if let Some(k) = kind {
+                        self.st.view.kinds = [k].into();
+                        self.st.view.show_hidden = false;
+                        self.changed();
+                    }
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    #[cfg(windows)]
+                    crate::win::bring_to_front();
+                }
+                Incoming::Refresh => self.refresh(ctx),
+                Incoming::Status { .. } => {}
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn snapshot_for_tests(&self) -> Snapshot {
+        self.snapshot.lock().unwrap().clone()
+    }
+
+    /// Tout est-il enregistré ?
+    #[cfg(test)]
+    pub(crate) fn is_saved(&self) -> bool {
+        !self.dirty
+    }
+
+    /// Compteurs publiés pour le canal (`etat`) et le titre de la fenêtre.
+    fn publish(&mut self, ctx: &egui::Context) {
+        if self.published == self.revision {
             return;
         }
-        self.dirty = false;
-        if let Err(e) = state::save(&self.dir, &self.st) {
-            self.dirty = true;
-            self.toast(format!("Enregistrement de l'état impossible : {e}"));
-        }
-    }
-
-    // --- Affichage -----------------------------------------------------------------------------------
-
-    fn toolbar(&mut self, ui: &mut egui::Ui) {
-        let ctx = ui.ctx().clone();
-        ui.horizontal(|ui| {
-            let waiting = self.st.inbox.waiting(now());
-            ui.heading("Boîte de réception");
-            if waiting > 0 {
-                ui.label(
-                    RichText::new(format!(" {waiting} "))
-                        .strong()
-                        .color(Color32::WHITE)
-                        .background_color(ui.visuals().selection.bg_fill),
-                );
-            }
-            ui.separator();
-            let busy = self.fetching.is_some();
-            if ui
-                .add_enabled(!busy, egui::Button::new("⟳ Actualiser"))
-                .on_hover_text(self.shortcuts.label(Command::Refresh))
-                .clicked()
-            {
-                self.refresh(&ctx);
-            }
-            if busy {
-                ui.spinner();
-            }
-            ui.add(egui::Label::new(RichText::new(&self.status_line).weak()).truncate());
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("⚙ Réglages").on_hover_text(self.shortcuts.label(Command::Settings)).clicked() {
-                    self.settings_open = !self.settings_open;
-                }
-                let label = if self.has_token { "🔑 Jeton GitHub ✔" } else { "🔑 Jeton GitHub…" };
-                if ui.button(label).clicked() {
-                    self.token_dialog = Some(TokenDialog::default());
-                }
-            });
-        });
-    }
-
-    fn filters(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
-            let search = ui.add(
-                egui::TextEdit::singleline(&mut self.filter.text)
-                    .hint_text("Chercher (dépôt, titre)")
-                    .desired_width(200.0),
-            );
-            if std::mem::take(&mut self.focus_search) {
-                search.request_focus();
-            }
-            ui.separator();
-            for kind in Kind::ALL {
-                let on = self.filter.kinds.contains(&kind);
-                if ui.selectable_label(on, kind.label()).clicked() {
-                    if on {
-                        self.filter.kinds.remove(&kind);
-                    } else {
-                        self.filter.kinds.insert(kind);
-                    }
-                }
-            }
-            ui.separator();
-            egui::ComboBox::from_id_salt("forge")
-                .selected_text(self.filter.forge.map_or("Toutes les forges", Forge::label))
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.filter.forge, None, "Toutes les forges");
-                    for f in Forge::ALL {
-                        ui.selectable_value(&mut self.filter.forge, Some(f), f.label());
-                    }
-                });
-            ui.checkbox(&mut self.filter.waiting_only, "Seulement ce qui m'attend");
-            ui.checkbox(&mut self.filter.show_hidden, "Terminés et reportés");
-            ui.separator();
-            ui.label("Grouper :");
-            let before = self.st.settings.group_by;
-            ui.selectable_value(&mut self.st.settings.group_by, GroupBy::Repo, "par dépôt");
-            ui.selectable_value(&mut self.st.settings.group_by, GroupBy::Kind, "par type");
-            if before != self.st.settings.group_by {
-                self.dirty = true;
-            }
-        });
-    }
-
-    fn list(&mut self, ui: &mut egui::Ui) {
+        self.published = self.revision;
         let now = now();
-        if self.st.inbox.items.is_empty() {
-            self.empty_state(ui);
+        let rules = self.rules().clone();
+        let mut snap = Snapshot::default();
+        for item in self.st.inbox.items.values() {
+            if !rules.shows(item) || self.st.inbox.status(item, now) != Status::Unread {
+                continue;
+            }
+            snap.waiting += 1;
+            *snap.by_kind.entry(item.kind).or_default() += 1;
+            if item.kind == Kind::ReviewRequested {
+                let key = crate::localrepo::item_key(item, &self.host_of(item));
+                *snap.reviews_by_repo.entry(key).or_default() += 1;
+            }
+        }
+        let waiting = snap.waiting;
+        if let Ok(mut s) = self.snapshot.lock() {
+            *s = snap;
+        }
+        if self.title_shown != Some(waiting) {
+            self.title_shown = Some(waiting);
+            let title = if waiting == 0 { "Owlery".to_string() } else { format!("Owlery — {waiting} en attente") };
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+        }
+    }
+
+    /// Taille, position et agrandissement gardés pour le prochain lancement.
+    fn track_window(&mut self, ctx: &egui::Context) {
+        let (inner, outer, maximized, minimized, focused) = ctx.input(|i| {
+            let v = i.viewport();
+            (v.inner_rect, v.outer_rect, v.maximized.unwrap_or(false), v.minimized.unwrap_or(false), v.focused)
+        });
+        if let Some(f) = focused {
+            if f && !self.focused {
+                // De retour dans Owlery : la notification n'a plus lieu d'être.
+                self.notifier.hide();
+            }
+            self.focused = f;
+        }
+        if minimized {
             return;
         }
-        let mut clicked = None;
-        let mut opened = None;
-        let mut actions: Vec<(String, Status)> = Vec::new();
-        let view = self.st.inbox.view(&self.filter, self.st.settings.group_by, now);
-        if view.is_empty() {
-            ui.add_space(20.0);
-            ui.vertical_centered(|ui| ui.label("Rien ne correspond aux filtres."));
-        }
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            for group in &view {
-                let title =
-                    if group.unread > 0 { format!("{}  ({})", group.title, group.unread) } else { group.title.clone() };
-                egui::CollapsingHeader::new(RichText::new(title).strong())
-                    .id_salt(&group.title)
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        for (item, status) in &group.entries {
-                            let selected = self.selected.as_deref() == Some(item.id.as_str());
-                            let resp = row(ui, item, *status, selected, now, self.st.settings.group_by);
-                            if resp.clicked() {
-                                clicked = Some(item.id.clone());
-                            }
-                            if resp.double_clicked() {
-                                opened = Some(item.id.clone());
-                            }
-                            resp.context_menu(|ui| {
-                                if ui.button("Ouvrir dans le navigateur").clicked() {
-                                    opened = Some(item.id.clone());
-                                    ui.close();
-                                }
-                                if ui.button("Marquer lu").clicked() {
-                                    actions.push((item.id.clone(), Status::Read));
-                                    ui.close();
-                                }
-                                if ui.button("Marquer non lu").clicked() {
-                                    actions.push((item.id.clone(), Status::Unread));
-                                    ui.close();
-                                }
-                                ui.menu_button("Me le rappeler", |ui| {
-                                    for s in Snooze::ALL {
-                                        if ui.button(s.label()).clicked() {
-                                            actions.push((item.id.clone(), Status::Snoozed { until: s.until(now) }));
-                                            ui.close();
-                                        }
-                                    }
-                                });
-                                if ui.button("Marquer terminé").clicked() {
-                                    actions.push((item.id.clone(), Status::Done));
-                                    ui.close();
-                                }
-                            });
-                            if selected && resp.gained_focus() {
-                                resp.scroll_to_me(None);
-                            }
-                        }
-                    });
+        let mut w = self.st.window.clone();
+        w.maximized = maximized;
+        if !maximized {
+            if let Some(r) = inner {
+                w.size = [r.width().round(), r.height().round()];
             }
-        });
-        drop(view);
-        if let Some(id) = clicked {
-            self.selected = Some(id);
-        }
-        if let Some(id) = opened {
-            self.open(&id);
-        }
-        for (id, s) in actions {
-            self.set_status(&id, s);
-        }
-    }
-
-    fn empty_state(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(40.0);
-        ui.vertical_centered(|ui| {
-            if self.no_access {
-                ui.heading("Owlery n'a pas encore accès à GitHub");
-                ui.add_space(8.0);
-                ui.label("Deux façons de lui en donner un, en lecture seule :");
-                ui.add_space(8.0);
-                if ui.button("🔑 Ajouter un jeton GitHub").clicked() {
-                    self.token_dialog = Some(TokenDialog::default());
-                }
-                ui.add_space(4.0);
-                ui.label("ou");
-                ui.add_space(4.0);
-                if ui.button("Installer gh, puis lancer `gh auth login`").clicked()
-                    && let Err(e) = actions::open_url(GH_PAGE)
-                {
-                    self.toast(e);
-                }
-            } else if self.fetching.is_some() {
-                ui.spinner();
-                ui.label("Lecture de GitHub…");
-            } else {
-                ui.heading("Rien ne vous attend 🎉");
-            }
-        });
-    }
-
-    fn detail(&mut self, ui: &mut egui::Ui) {
-        let now = now();
-        let Some(item) = self.selected.as_ref().and_then(|id| self.st.inbox.items.get(id)).cloned() else {
-            ui.add_space(20.0);
-            ui.vertical_centered(|ui| ui.label(RichText::new("Choisissez une entrée.").weak()));
-            return;
-        };
-        let status = self.st.inbox.status(&item, now);
-        ui.label(RichText::new(format!("{} · {}", item.kind.label(), item.forge.label())).weak());
-        ui.heading(&item.title);
-        let number = item.number.map(|n| format!("#{n}")).unwrap_or_default();
-        ui.label(format!("{} {number}", item.repo));
-        egui::Grid::new("detail").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
-            if !item.author.is_empty() {
-                ui.label("Auteur");
-                ui.label(&item.author);
-                ui.end_row();
-            }
-            if let Some(b) = &item.branch {
-                ui.label("Branche");
-                ui.label(b);
-                ui.end_row();
-            }
-            if let Some(ci) = item.ci {
-                ui.label("CI");
-                let (text, color) = ci_label(ci);
-                ui.label(RichText::new(text).color(color));
-                ui.end_row();
-            }
-            ui.label("Activité");
-            ui.label(format!("{} ({})", ago(item.updated_at, now), date(item.updated_at)));
-            ui.end_row();
-            ui.label("État");
-            ui.label(status_label(status));
-            ui.end_row();
-        });
-        if !item.summary.is_empty() {
-            ui.add_space(6.0);
-            ui.label(&item.summary);
-        }
-        ui.add_space(10.0);
-        ui.separator();
-        let id = item.id.clone();
-        if ui.button("🌐 Ouvrir dans le navigateur").on_hover_text(self.shortcuts.label(Command::Open)).clicked() {
-            self.open(&id);
-        }
-        ui.horizontal(|ui| {
-            if status == Status::Unread {
-                if ui.button("Marquer lu").on_hover_text(self.shortcuts.label(Command::MarkRead)).clicked() {
-                    self.set_status(&id, Status::Read);
-                }
-            } else if ui.button("Marquer non lu").on_hover_text(self.shortcuts.label(Command::MarkUnread)).clicked() {
-                self.set_status(&id, Status::Unread);
-            }
-            if ui.button("✔ Terminé").on_hover_text(self.shortcuts.label(Command::MarkDone)).clicked() {
-                self.set_status(&id, Status::Done);
-            }
-        });
-        ui.horizontal(|ui| {
-            ui.label("Me le rappeler :");
-            for s in Snooze::ALL {
-                if ui.small_button(s.label()).clicked() {
-                    self.set_status(&id, Status::Snoozed { until: s.until(now) });
-                }
-            }
-        });
-        ui.add_space(10.0);
-        ui.separator();
-        self.local_actions(ui, &item);
-    }
-
-    /// Dossier local du dépôt, DragonTree et Claude.
-    fn local_actions(&mut self, ui: &mut egui::Ui, item: &Item) {
-        let dir = self.st.settings.repo_dirs.get(&item.repo).cloned();
-        ui.horizontal(|ui| {
-            ui.label("Dossier local :");
-            ui.label(RichText::new(dir.as_deref().unwrap_or("non choisi")).monospace());
-            if ui.small_button("Choisir…").clicked()
-                && let Some(d) =
-                    rfd::FileDialog::new().set_title(format!("Dossier local de {}", item.repo)).pick_folder()
-            {
-                self.st.settings.repo_dirs.insert(item.repo.clone(), d.display().to_string());
-                self.dirty = true;
-            }
-        });
-        let dragontree = actions::find_dragontree(&self.st.settings.dragontree_exe);
-        let can_dt = dir.is_some() && dragontree.is_some();
-        let hint = if dragontree.is_none() {
-            "dragontree.exe introuvable : indiquez son chemin dans les réglages"
-        } else if dir.is_none() {
-            "Choisissez d'abord le dossier local du dépôt"
-        } else {
-            "Ouvre le dossier du dépôt dans DragonTree"
-        };
-        if ui
-            .add_enabled(can_dt, egui::Button::new("🌳 Ouvrir dans DragonTree"))
-            .on_hover_text(hint)
-            .on_disabled_hover_text(hint)
-            .clicked()
-            && let (Some(exe), Some(d)) = (dragontree, dir)
-            && let Err(e) = actions::open_in_dragontree(&exe, std::path::Path::new(&d))
-        {
-            self.toast(e);
-        }
-        let fawkes_hint = "Fawkes ne reçoit pas encore de demandes (contrat local à venir, voir docs/contrat-local.md)";
-        ui.add_enabled(false, egui::Button::new("✨ Corriger avec Claude")).on_disabled_hover_text(fawkes_hint);
-        if ui
-            .button("📋 Copier le contexte pour Claude")
-            .on_hover_text("Lien, branche et échec de CI, à coller dans une session Claude")
-            .clicked()
-        {
-            ui.ctx().copy_text(actions::claude_context(item));
-            self.toast("Contexte copié : rien n'a été envoyé");
-        }
-    }
-
-    fn token_window(&mut self, ctx: &egui::Context) {
-        let Some(dialog) = &mut self.token_dialog else { return };
-        let mut close = false;
-        let mut save = None;
-        let mut remove = false;
-        egui::Modal::new(egui::Id::unique("token")).show(ctx, |ui| {
-            ui.set_width(460.0);
-            ui.heading("Jeton GitHub");
-            ui.label("Owlery lit GitHub en lecture seule. Créez un jeton à grain fin avec, en lecture seule :");
-            ui.label("  • Metadata, Pull requests, Issues, Commit statuses, Checks (dépôts concernés) ;");
-            ui.label("  • rien en écriture.");
-            ui.label("Un jeton classique marche aussi, avec la portée « repo » (ou « public_repo »).");
-            if ui.link("Créer un jeton sur GitHub").clicked() {
-                let _ = actions::open_url(TOKEN_PAGE);
-            }
-            ui.add_space(6.0);
-            ui.label("Le jeton est rangé dans le Gestionnaire d'identifiants de Windows (service « Owlery »), jamais ailleurs, et n'est plus jamais affiché.");
-            ui.add(egui::TextEdit::singleline(&mut dialog.input).password(true).hint_text("Coller le jeton").desired_width(f32::INFINITY));
-            if let Some(e) = &dialog.error {
-                ui.colored_label(ui.visuals().error_fg_color, e);
-            }
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                if ui.button("Enregistrer").clicked() {
-                    save = Some(std::mem::take(&mut dialog.input));
-                }
-                if ui.button("Annuler").clicked() {
-                    close = true;
-                }
-                if self.has_token && ui.button("Retirer le jeton").clicked() {
-                    remove = true;
-                }
-            });
-        });
-        if let Some(token) = save {
-            match secrets::store_token(self.store.as_ref(), GITHUB_TOKEN, &token) {
-                Ok(()) => {
-                    self.has_token = true;
-                    self.token_dialog = None;
-                    self.toast("Jeton enregistré dans le coffre de Windows");
-                    self.refresh(ctx);
-                }
-                Err(e) => {
-                    if let Some(d) = &mut self.token_dialog {
-                        d.error = Some(format!("Enregistrement impossible : {e}"));
-                    }
-                }
-            }
-        } else if remove {
-            match self.store.delete(GITHUB_TOKEN) {
-                Ok(()) => {
-                    self.has_token = false;
-                    self.token_dialog = None;
-                    self.toast("Jeton retiré du coffre");
-                }
-                Err(e) => {
-                    if let Some(d) = &mut self.token_dialog {
-                        d.error = Some(format!("Suppression impossible : {e}"));
-                    }
-                }
-            }
-        } else if close || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.token_dialog = None;
-        }
-    }
-
-    fn settings_window(&mut self, ctx: &egui::Context) {
-        if !self.settings_open {
-            return;
-        }
-        // Saisie d'un raccourci : la prochaine combinaison est prise (Échap annule).
-        if let Some((cmd, slot)) = self.capturing {
-            let got = ctx.input_mut(|i| {
-                let mut found = None;
-                i.events.retain(|ev| {
-                    if found.is_none()
-                        && let Some(b) = Binding::from_event(ev)
-                    {
-                        found = Some(b);
-                        return false;
-                    }
-                    true
-                });
-                found
-            });
-            if let Some(b) = got {
-                self.capturing = None;
-                if b.key != egui::Key::Escape {
-                    let conflicts = self.shortcuts.conflicts(cmd, &b);
-                    if !conflicts.is_empty() {
-                        let names: Vec<&str> = conflicts.iter().map(|c| c.label()).collect();
-                        self.toast(format!("{} servait déjà à : {} (gardé aussi)", b.label(), names.join(", ")));
-                    }
-                    self.shortcuts.set(cmd, slot, Some(b));
-                    self.st.settings.shortcuts = self.shortcuts.to_settings();
-                    self.dirty = true;
-                }
+            if let Some(r) = outer {
+                w.pos = Some([r.min.x.round(), r.min.y.round()]);
             }
         }
-        let mut open = true;
-        let mut changed = false;
-        egui::Window::new("Réglages").open(&mut open).default_width(520.0).show(ctx, |ui| {
-            egui::Grid::new("settings").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
-                ui.label("Lecture périodique");
-                ui.horizontal(|ui| {
-                    changed |= ui
-                        .add(egui::DragValue::new(&mut self.st.settings.refresh_minutes).range(0..=240).suffix(" min"))
-                        .changed();
-                    ui.label(RichText::new("0 : seulement à la demande").weak());
-                });
-                ui.end_row();
-                ui.label("Thème");
-                ui.horizontal(|ui| {
-                    for (t, label) in
-                        [(ThemeChoice::System, "Système"), (ThemeChoice::Dark, "Sombre"), (ThemeChoice::Light, "Clair")]
-                    {
-                        if ui.selectable_value(&mut self.st.settings.theme, t, label).changed() {
-                            apply_theme(ui.ctx(), t);
-                            changed = true;
-                        }
-                    }
-                });
-                ui.end_row();
-                ui.label("dragontree.exe");
-                ui.horizontal(|ui| {
-                    changed |= ui
-                        .add(
-                            egui::TextEdit::singleline(&mut self.st.settings.dragontree_exe)
-                                .hint_text("cherché dans le PATH"),
-                        )
-                        .changed();
-                    if ui.small_button("Choisir…").clicked()
-                        && let Some(p) = rfd::FileDialog::new().add_filter("Programme", &["exe"]).pick_file()
-                    {
-                        self.st.settings.dragontree_exe = p.display().to_string();
-                        changed = true;
-                    }
-                });
-                ui.end_row();
-            });
-            ui.add_space(8.0);
-            ui.collapsing("Raccourcis", |ui| {
-                egui::Grid::new("shortcuts").num_columns(4).striped(true).show(ui, |ui| {
-                    for cmd in Command::ALL {
-                        ui.label(cmd.label());
-                        let slots = self.shortcuts.get(cmd);
-                        for (slot, b) in slots.iter().enumerate() {
-                            let waiting = self.capturing == Some((cmd, slot));
-                            let text = if waiting {
-                                "Appuyez…".to_string()
-                            } else {
-                                b.map(|b| b.label()).unwrap_or_else(|| "—".into())
-                            };
-                            let resp = ui.button(text).on_hover_text("Clic : changer · clic droit : effacer");
-                            if resp.clicked() {
-                                self.capturing = Some((cmd, slot));
-                            }
-                            if resp.secondary_clicked() {
-                                self.shortcuts.set(cmd, slot, None);
-                                changed = true;
-                            }
-                        }
-                        if ui.small_button("Défaut").clicked() {
-                            self.shortcuts.reset(cmd);
-                            changed = true;
-                        }
-                        ui.end_row();
-                    }
-                });
-            });
-            ui.add_space(8.0);
-            ui.label(RichText::new(format!("Dossier de l'état : {}", self.dir.display())).weak());
-        });
-        if changed {
-            self.st.settings.shortcuts = self.shortcuts.to_settings();
+        if w != self.st.window && w.size[0] > 100.0 {
+            self.st.window = w;
             self.dirty = true;
         }
-        if !open {
-            self.settings_open = false;
-            self.capturing = None;
-        }
     }
 
-    fn palette_window(&mut self, ctx: &egui::Context) {
-        let Some(p) = &mut self.palette else { return };
-        let entries: Vec<(String, PaletteAction)> = palette_entries(&self.shortcuts)
-            .into_iter()
-            .filter(|(label, _)| label.to_lowercase().contains(&p.query.to_lowercase()))
-            .collect();
-        p.selected = p.selected.min(entries.len().saturating_sub(1));
-        let (up, down, enter, escape) = ctx.input(|i| {
-            (
-                i.key_pressed(egui::Key::ArrowUp),
-                i.key_pressed(egui::Key::ArrowDown),
-                i.key_pressed(egui::Key::Enter),
-                i.key_pressed(egui::Key::Escape),
-            )
-        });
-        if down {
-            p.selected = (p.selected + 1).min(entries.len().saturating_sub(1));
-        }
-        if up {
-            p.selected = p.selected.saturating_sub(1);
-        }
-        let mut chosen = None;
-        egui::Modal::new(egui::Id::unique("palette")).show(ctx, |ui| {
-            ui.set_width(420.0);
-            ui.add(egui::TextEdit::singleline(&mut p.query).hint_text("Commande…").desired_width(f32::INFINITY))
-                .request_focus();
-            for (i, (label, action)) in entries.iter().enumerate() {
-                if ui.selectable_label(i == p.selected, label).clicked() {
-                    chosen = Some(*action);
-                }
-            }
-        });
-        if enter {
-            chosen = entries.get(p.selected).map(|(_, a)| *a);
-        }
-        if chosen.is_some() || escape {
-            self.palette = None;
-        }
-        match chosen {
-            Some(PaletteAction::Run(cmd)) => self.run(ctx, cmd),
-            Some(PaletteAction::Show(kind)) => {
-                self.filter = Filter::default();
-                if let Some(k) = kind {
-                    self.filter.kinds.insert(k);
-                }
-            }
-            None => {}
-        }
-    }
-
-    fn banners(&mut self, ui: &mut egui::Ui) {
-        let mut dismiss = None;
-        for (i, p) in self.problems.iter().enumerate() {
-            ui.horizontal(|ui| {
-                ui.colored_label(ui.visuals().warn_fg_color, format!("⚠ {p}"));
-                if ui.small_button("Compris").clicked() {
-                    dismiss = Some(i);
-                }
-            });
-        }
-        if let Some(i) = dismiss {
-            self.problems.remove(i);
-        }
-    }
-
-    fn toasts(&mut self, ctx: &egui::Context) {
-        self.toasts.retain(|(_, t)| t.elapsed() < Duration::from_secs(5));
-        if self.toasts.is_empty() {
+    /// Enregistre l'état s'il a changé : au plus une fois par seconde, et après un échec une nouvelle tentative
+    /// toutes les 30 s (un seul bandeau, pas un message par essai).
+    fn save(&mut self, force: bool) {
+        if !self.dirty || !self.writable {
             return;
         }
-        egui::Area::new(egui::Id::unique("toasts")).anchor(egui::Align2::RIGHT_BOTTOM, [-12.0, -12.0]).show(
-            ctx,
-            |ui| {
-                for (msg, _) in &self.toasts {
-                    egui::Frame::popup(ui.style()).show(ui, |ui| ui.label(msg));
-                }
-            },
-        );
-        ctx.request_repaint_after(Duration::from_millis(500));
+        let wait = if self.save_error.is_some() { Duration::from_secs(30) } else { Duration::from_secs(1) };
+        if !force && self.last_save.is_some_and(|t| t.elapsed() < wait) {
+            return;
+        }
+        self.last_save = Some(Instant::now());
+        self.st.settings.shortcuts = self.shortcuts.to_settings();
+        match state::save(&self.dir, &self.st) {
+            Ok(()) => {
+                self.dirty = false;
+                self.save_error = None;
+            }
+            Err(e) => {
+                self.save_error = Some(format!("Enregistrement de l'état impossible ({e}) : nouvel essai dans 30 s."))
+            }
+        }
+    }
+
+    /// Fenêtre principale (Windows), pour la ramener au premier plan depuis le canal ou une notification.
+    fn learn_window(&mut self, frame: &eframe::Frame) {
+        if self.window_known {
+            return;
+        }
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let Ok(handle) = frame.window_handle() else { return };
+        self.window_known = true;
+        #[cfg(windows)]
+        if let RawWindowHandle::Win32(h) = handle.as_raw() {
+            crate::win::set_main_window(h.hwnd.get());
+        }
+        #[cfg(not(windows))]
+        let _ = handle;
     }
 }
 
-#[derive(Clone, Copy)]
-enum PaletteAction {
-    Run(Command),
-    /// Aller à la boîte de réception, filtrée sur un type (ou tout).
-    Show(Option<Kind>),
-}
-
-fn palette_entries(shortcuts: &Shortcuts) -> Vec<(String, PaletteAction)> {
-    let mut v = vec![
-        ("Aller à la boîte de réception".to_string(), PaletteAction::Show(None)),
-        ("PR à relire".to_string(), PaletteAction::Show(Some(Kind::ReviewRequested))),
-        ("CI en échec".to_string(), PaletteAction::Show(Some(Kind::CiFailed))),
-        ("Mentions".to_string(), PaletteAction::Show(Some(Kind::Mention))),
-        ("Tickets assignés".to_string(), PaletteAction::Show(Some(Kind::Assigned))),
-    ];
-    for cmd in Command::ALL.into_iter().filter(|c| *c != Command::Palette) {
-        let key = shortcuts.label(cmd);
-        let label = if key.is_empty() { cmd.label().to_string() } else { format!("{}    {key}", cmd.label()) };
-        v.push((label, PaletteAction::Run(cmd)));
-    }
-    v
-}
-
-fn apply_theme(ctx: &egui::Context, theme: ThemeChoice) {
+pub(crate) fn apply_theme(ctx: &egui::Context, theme: ThemeChoice) {
     ctx.set_theme(match theme {
         ThemeChoice::System => egui::ThemePreference::System,
         ThemeChoice::Dark => egui::ThemePreference::Dark,
@@ -899,140 +917,49 @@ fn apply_theme(ctx: &egui::Context, theme: ThemeChoice) {
     });
 }
 
-fn ci_label(ci: Ci) -> (&'static str, Color32) {
-    match ci {
-        Ci::Success => ("✔ réussie", Color32::from_rgb(0x3f, 0xb9, 0x50)),
-        Ci::Pending => ("⟳ en cours", Color32::from_rgb(0xd2, 0x99, 0x22)),
-        Ci::Failure => ("✖ en échec", Color32::from_rgb(0xf8, 0x51, 0x49)),
+/// Fenêtre à la taille et à la position gardées.
+pub fn viewport(window: &WindowState) -> egui::ViewportBuilder {
+    let size = crate::icon::owl(64);
+    let mut v = egui::ViewportBuilder::default()
+        .with_title("Owlery")
+        .with_app_id("owlery")
+        .with_inner_size(window.size)
+        .with_min_inner_size([640.0, 360.0])
+        .with_maximized(window.maximized)
+        .with_icon(egui::IconData { rgba: size, width: 64, height: 64 });
+    if let Some(pos) = window.pos {
+        v = v.with_position(pos);
     }
-}
-
-fn status_label(s: Status) -> String {
-    match s {
-        Status::Unread => "non lu".into(),
-        Status::Read => "lu".into(),
-        Status::Done => "terminé".into(),
-        Status::Snoozed { until } => format!("reporté jusqu'au {}", date(until)),
-    }
-}
-
-fn date(t: i64) -> String {
-    chrono::DateTime::from_timestamp(t, 0)
-        .map(|d| d.with_timezone(&chrono::Local).format("%d/%m %H:%M").to_string())
-        .unwrap_or_default()
-}
-
-/// « à l'instant », « il y a 12 min », « il y a 3 h », « il y a 2 j ».
-pub fn ago(t: i64, now: i64) -> String {
-    let s = (now - t).max(0);
-    match s {
-        0..60 => "à l'instant".into(),
-        60..3600 => format!("il y a {} min", s / 60),
-        3600..86400 => format!("il y a {} h", s / 3600),
-        _ => format!("il y a {} j", s / 86400),
-    }
-}
-
-/// Une ligne de la liste : pastille non lu, type ou dépôt, titre, CI, ancienneté.
-fn row(ui: &mut egui::Ui, item: &Item, status: Status, selected: bool, now: i64, group_by: GroupBy) -> egui::Response {
-    let unread = status == Status::Unread;
-    let resp = ui
-        .horizontal(|ui| {
-            ui.set_width(ui.available_width());
-            let (dot, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-            if unread {
-                ui.painter().circle_filled(dot.center(), 4.0, ui.visuals().selection.bg_fill);
-            }
-            let tag = match group_by {
-                GroupBy::Repo => item.kind.label().to_string(),
-                GroupBy::Kind => item.repo.clone(),
-            };
-            ui.label(RichText::new(tag).small().weak());
-            let mut title = RichText::new(&item.title);
-            if unread {
-                title = title.strong();
-            }
-            if matches!(status, Status::Done | Status::Snoozed { .. }) {
-                title = title.weak();
-            }
-            ui.label(title);
-            if let Some(n) = item.number {
-                ui.label(RichText::new(format!("#{n}")).weak());
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new(ago(item.updated_at, now)).small().weak());
-                if let Some(ci) = item.ci {
-                    let (text, color) = ci_label(ci);
-                    ui.label(RichText::new(&text[..text.find(' ').unwrap_or(text.len())]).color(color))
-                        .on_hover_text(text);
-                }
-                if let Status::Snoozed { until } = status {
-                    ui.label(RichText::new(format!("⏰ {}", date(until))).small().weak());
-                }
-            });
-        })
-        .response;
-    let resp = resp.interact(egui::Sense::click());
-    if selected {
-        ui.painter().rect_filled(resp.rect, 3.0, ui.visuals().selection.bg_fill.gamma_multiply(0.25));
-    } else if resp.hovered() {
-        ui.painter().rect_filled(resp.rect, 3.0, ui.visuals().widgets.hovered.weak_bg_fill.gamma_multiply(0.4));
-    }
-    resp
+    v
 }
 
 impl eframe::App for App {
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.poll_fetch();
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.learn_window(frame);
+        self.poll_fetches(ctx);
+        self.poll_scan();
+        self.poll_fawkes(ctx);
+        self.poll_incoming(ctx);
+        self.ensure_comments(ctx);
+        self.due_snoozes();
         self.auto_refresh(ctx);
+        self.track_window(ctx);
+        self.publish(ctx);
         crate::capture::poll(ctx, self.capture.as_ref());
-        self.save();
-        // Réveil léger : lecture périodique et fin des reports.
-        ctx.request_repaint_after(Duration::from_secs(30));
+        self.save(false);
+        // Réveil léger : lecture périodique, fin des reports, demandes du canal.
+        ctx.request_repaint_after(Duration::from_secs(if self.incoming.is_some() { 1 } else { 30 }));
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.handle_shortcuts(&ctx);
-        egui::Panel::top("toolbar").show(ui, |ui| {
-            ui.add_space(4.0);
-            self.toolbar(ui);
-            self.filters(ui);
-            self.banners(ui);
-            ui.add_space(2.0);
-        });
-        egui::Panel::right("detail").default_size(360.0).resizable(true).show(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| self.detail(ui));
-        });
-        egui::CentralPanel::default().show(ui, |ui| self.list(ui));
-        self.token_window(&ctx);
-        self.settings_window(&ctx);
-        self.palette_window(&ctx);
-        self.toasts(&ctx);
-        self.save();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ages_read_naturally() {
-        assert_eq!(ago(100, 110), "à l'instant");
-        assert_eq!(ago(0, 12 * 60), "il y a 12 min");
-        assert_eq!(ago(0, 3 * 3600 + 5), "il y a 3 h");
-        assert_eq!(ago(0, 2 * 86400), "il y a 2 j");
-        assert_eq!(ago(500, 100), "à l'instant");
+        crate::ui::draw(self, ui);
+        self.save(false);
     }
 
-    #[test]
-    fn palette_offers_the_spec_entries() {
-        let labels: Vec<String> =
-            palette_entries(&Shortcuts::from_settings(&Default::default())).into_iter().map(|(l, _)| l).collect();
-        for want in ["Aller à la boîte de réception", "PR à relire", "CI en échec"] {
-            assert!(labels.iter().any(|l| l == want), "{want}");
-        }
-        assert!(labels.iter().any(|l| l.starts_with("Actualiser") && l.ends_with("F5")));
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.save(true);
+        self.notifier.hide();
     }
 }

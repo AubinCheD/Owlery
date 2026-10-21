@@ -1,0 +1,6 @@
+[
+  {"id": 9031, "iid": 31, "project_id": 7, "title": "Corrige l'export CSV", "description": "",
+   "state": "opened", "web_url": "https://gitlab.com/contoso/api/-/merge_requests/31", "source_branch": "export-csv",
+   "author": {"username": "camille"}, "updated_at": "2026-10-19T10:00:00Z",
+   "references": {"full": "contoso/api!31"}, "user_notes_count": 0}
+]

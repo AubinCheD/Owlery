@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "saved_by": "0.1.0",
+  "settings": {
+    "refresh_minutes": 10,
+    "group_by": "Repo",
+    "theme": "System",
+    "shortcuts": {},
+    "repo_dirs": {},
+    "dragontree_exe": ""
+  },
+  "inbox": {
+    "items": {
+      "GitHub:contoso/api#142:Mention": {
+        "id": "GitHub:contoso/api#142:Mention",
+        "forge": "GitHub",
+        "kind": "Mention",
+        "repo": "contoso/api",
+        "number": 142,
+        "title": "Ajoute la pagination",
+        "url": "https://github.com/contoso/api/pull/142",
+        "branch": null,
+        "author": "camille",
+        "updated_at": 300,
+        "ci": null,
+        "summary": ""
+      },
+      "GitHub:contoso/api#142:ReviewRequested": {
+        "id": "GitHub:contoso/api#142:ReviewRequested",
+        "forge": "GitHub",
+        "kind": "ReviewRequested",
+        "repo": "contoso/api",
+        "number": 142,
+        "title": "Ajoute la pagination",
+        "url": "https://github.com/contoso/api/pull/142",
+        "branch": "pagination",
+        "author": "camille",
+        "updated_at": 300,
+        "ci": "Success",
+        "summary": "Pagination des résultats"
+      },
+      "GitHub:fabrikam/web#57:Mention": {
+        "id": "GitHub:fabrikam/web#57:Mention",
+        "forge": "GitHub",
+        "kind": "Mention",
+        "repo": "fabrikam/web",
+        "number": 57,
+        "title": "Question sur le cache",
+        "url": "https://github.com/fabrikam/web/issues/57",
+        "branch": null,
+        "author": "alex",
+        "updated_at": 200,
+        "ci": null,
+        "summary": ""
+      }
+    },
+    "marks": {
+      "GitHub:contoso/api#142:Mention": { "status": "Read", "seen_updated_at": 100 },
+      "GitHub:contoso/api#142:ReviewRequested": { "status": "Done", "seen_updated_at": 300 }
+    },
+    "last_seen": {
+      "GitHub:contoso/api#142:Mention": 400,
+      "GitHub:contoso/api#142:ReviewRequested": 400,
+      "GitHub:fabrikam/web#57:Mention": 400
+    }
+  }
+}
