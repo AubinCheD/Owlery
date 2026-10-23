@@ -9,24 +9,29 @@ use crate::app::{AccountDraft, App};
 use crate::forges::{Account, Auth, FetchError, GH_ACCOUNT_ID, normalize_host};
 use crate::model::Forge;
 
-/// Droits minimaux et page de création du jeton, par forge.
+/// Droits et page de création du jeton, par forge. Le jeton sert à toute la suite EyrieSuite : DragonTree, qui le
+/// partage, clone et pousse avec ; les droits sont donc les siens.
 pub fn token_help(forge: Forge, host: &str, orgs: &str) -> (&'static str, String) {
     match forge {
         Forge::GitHub => (
-            "Jeton à grain fin, en lecture seule : Metadata, Pull requests, Issues, Commit statuses et Checks, sur les \
-             dépôts concernés. Un jeton classique marche aussi, avec la portée « repo » (ou « public_repo »).",
-            format!("https://{host}/settings/personal-access-tokens/new"),
+            "Ce jeton sert à toute la suite (Eyrie, DragonTree, Owlery), qui clone et pousse aussi avec : jeton \
+             classique avec les portées « repo », « read:org » et « workflow ».",
+            format!("https://{host}/settings/tokens/new?scopes=repo,read:org,workflow&description=EyrieSuite"),
         ),
         Forge::GitLab => (
-            "Jeton d'accès personnel avec la seule portée « read_api ».",
-            format!("https://{host}/-/user_settings/personal_access_tokens?name=Owlery&scopes=read_api"),
+            "Ce jeton sert à toute la suite (Eyrie, DragonTree, Owlery) : portées « api », « read_repository » et \
+             « write_repository ».",
+            format!(
+                "https://{host}/-/user_settings/personal_access_tokens?name=EyrieSuite&scopes=api,read_repository,write_repository"
+            ),
         ),
         Forge::AzureDevOps => {
             let org = orgs.split(',').map(str::trim).find(|o| !o.is_empty()).unwrap_or("<organisation>");
             (
-                "Jeton d'accès personnel, en lecture seule : Code, Work Items et Build. Indiquez la ou les \
-                 organisations (séparées par des virgules). Azure DevOps Server : l'hôte du serveur, et en \
-                 organisation le chemin de la collection (par exemple tfs/DefaultCollection).",
+                "Ce jeton sert à toute la suite (Eyrie, DragonTree, Owlery) : Code (lecture et écriture), Work Items \
+                 et Build (lecture). Indiquez la ou les organisations (séparées par des virgules). Azure DevOps \
+                 Server : l'hôte du serveur, et en organisation le chemin de la collection (par exemple \
+                 tfs/DefaultCollection).",
                 format!("https://{host}/{org}/_usersSettings/tokens"),
             )
         }
@@ -227,14 +232,41 @@ fn poll_check(app: &mut App, ctx: &egui::Context) {
             let mut account = draft_account(d);
             account.username = identity.username;
             account.display_name = identity.display_name;
-            if account.auth == Auth::Token
-                && let Err(e) = crate::secrets::store_token(app.store.as_ref(), &account.token_key(), &d.token)
-            {
-                d.error = Some(format!("Enregistrement du jeton impossible : {e}"));
-                return;
-            }
-            let title = account.title();
-            app.st.settings.accounts.push(account);
+            let token = d.token.clone();
+            let title = match (account.auth, app.suite().cloned()) {
+                // Un compte à jeton est celui de toute la suite (Eyrie, DragonTree).
+                (Auth::Token, Some(suite)) => match suite.add(account.to_suite(), &token) {
+                    Ok(stored) => {
+                        app.load_suite();
+                        let title = Account::from_suite(&stored).map(|a| a.title()).unwrap_or_else(|| account.title());
+                        // Connexion déjà connue de la suite : elle garde son identifiant, le jeton est remplacé.
+                        if stored.id != account.id {
+                            format!("{title} — jeton remplacé pour toute la suite")
+                        } else {
+                            title
+                        }
+                    }
+                    Err(e) => {
+                        if let Some(d) = &mut app.draft {
+                            d.error = Some(format!("Enregistrement du compte impossible : {e}"));
+                        }
+                        return;
+                    }
+                },
+                _ => {
+                    if account.auth == Auth::Token
+                        && let Err(e) = crate::secrets::store_token(app.store.as_ref(), &account.token_key(), &token)
+                    {
+                        if let Some(d) = &mut app.draft {
+                            d.error = Some(format!("Enregistrement du jeton impossible : {e}"));
+                        }
+                        return;
+                    }
+                    let title = account.title();
+                    app.st.settings.accounts.push(account);
+                    title
+                }
+            };
             app.draft = None;
             app.changed();
             app.toast(format!("Compte ajouté : {title}"));
@@ -244,6 +276,17 @@ fn poll_check(app: &mut App, ctx: &egui::Context) {
 }
 
 fn remove_account(app: &mut App, id: &str) {
+    if app.is_suite_account(id) {
+        let title = app.accounts().into_iter().find(|a| a.id == id).map(|a| a.title()).unwrap_or_default();
+        if let Some(Err(e)) = app.suite().map(|s| s.remove(id)) {
+            app.toast(format!("Suppression du compte impossible : {e}. Le compte est gardé."));
+            return;
+        }
+        app.load_suite();
+        forget_entries(app, id);
+        app.toast(format!("Compte retiré de toute la suite : {title}"));
+        return;
+    }
     let Some(pos) = app.st.settings.accounts.iter().position(|a| a.id == id) else { return };
     let account = app.st.settings.accounts[pos].clone();
     if account.auth == Auth::Token
@@ -253,13 +296,18 @@ fn remove_account(app: &mut App, id: &str) {
         return;
     }
     app.st.settings.accounts.remove(pos);
+    forget_entries(app, id);
+    app.toast(format!("Compte retiré : {}", account.title()));
+}
+
+/// Retire les entrées et l'état de lecture d'un compte retiré.
+fn forget_entries(app: &mut App, id: &str) {
     app.st.inbox.remove_account(id);
     app.status.remove(id);
     if app.selected.as_ref().is_some_and(|s| !app.st.inbox.items.contains_key(s)) {
         app.selected = None;
     }
     app.changed();
-    app.toast(format!("Compte retiré : {}", account.title()));
 }
 
 #[cfg(test)]
@@ -267,14 +315,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn token_help_names_the_minimal_rights_and_the_page() {
+    fn token_help_names_the_rights_of_the_whole_suite() {
+        // Le jeton sert à toute la suite : DragonTree, qui le partage, clone et pousse.
         let (help, link) = token_help(Forge::GitHub, "github.com", "");
-        assert!(help.contains("lecture seule") && help.contains("Checks"));
-        assert_eq!(link, "https://github.com/settings/personal-access-tokens/new");
+        assert!(help.contains("toute la suite") && help.contains("repo"), "{help}");
+        assert!(!help.contains("lecture seule"), "{help}");
+        assert_eq!(link, "https://github.com/settings/tokens/new?scopes=repo,read:org,workflow&description=EyrieSuite");
         let (help, link) = token_help(Forge::GitLab, "gitlab.contoso.test", "");
-        assert!(help.contains("read_api"));
+        assert!(help.contains("write_repository"), "{help}");
         assert!(link.starts_with("https://gitlab.contoso.test/-/user_settings/personal_access_tokens"));
-        let (_, link) = token_help(Forge::AzureDevOps, "dev.azure.com", " fabrikam , northwind");
+        assert!(link.contains("write_repository"));
+        let (help, link) = token_help(Forge::AzureDevOps, "dev.azure.com", " fabrikam , northwind");
+        assert!(help.contains("Code (lecture et écriture)"), "{help}");
         assert_eq!(link, "https://dev.azure.com/fabrikam/_usersSettings/tokens");
     }
 }

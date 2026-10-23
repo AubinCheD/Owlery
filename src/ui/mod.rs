@@ -105,7 +105,7 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
                 app.settings_open = !app.settings_open;
             }
             if ui.button("👤 Comptes…").clicked() {
-                app.accounts_open = !app.accounts_open;
+                app.toggle_accounts();
             }
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 let busy = !app.running.is_empty();

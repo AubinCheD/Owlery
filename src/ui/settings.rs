@@ -18,6 +18,8 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
     let mut changed = false;
     let mut rescan = false;
     egui::Window::new("Réglages").open(&mut open).default_width(560.0).vscroll(true).show(ctx, |ui| {
+        // Embarqué, le thème est celui de l'hôte.
+        let hosted = app.hosted;
         let s = &mut app.st.settings;
         egui::Grid::new("settings").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
             ui.label("Lecture périodique");
@@ -26,16 +28,20 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
                 ui.label(RichText::new("0 : seulement à la demande").weak());
             });
             ui.end_row();
-            ui.label("Thème");
-            ui.horizontal(|ui| {
-                for (t, label) in [(ThemeChoice::System, "Système"), (ThemeChoice::Dark, "Sombre"), (ThemeChoice::Light, "Clair")] {
-                    if ui.selectable_value(&mut s.theme, t, label).changed() {
-                        apply_theme(ui.ctx(), t);
-                        changed = true;
+            if !hosted {
+                ui.label("Thème");
+                ui.horizontal(|ui| {
+                    for (t, label) in
+                        [(ThemeChoice::System, "Système"), (ThemeChoice::Dark, "Sombre"), (ThemeChoice::Light, "Clair")]
+                    {
+                        if ui.selectable_value(&mut s.theme, t, label).changed() {
+                            apply_theme(ui.ctx(), t);
+                            changed = true;
+                        }
                     }
-                }
-            });
-            ui.end_row();
+                });
+                ui.end_row();
+            }
         });
 
         ui.add_space(8.0);

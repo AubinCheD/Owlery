@@ -99,6 +99,62 @@ impl Account {
     }
 }
 
+/// Forge d'un compte de la suite (`suite_accounts::forge`).
+pub fn suite_forge(forge: Forge) -> &'static str {
+    match forge {
+        Forge::GitHub => suite_accounts::forge::GITHUB,
+        Forge::GitLab => suite_accounts::forge::GITLAB,
+        Forge::AzureDevOps => suite_accounts::forge::AZURE,
+    }
+}
+
+impl Account {
+    /// Le compte tel que la suite le range (son jeton est à part, dans le coffre).
+    pub fn to_suite(&self) -> suite_accounts::Account {
+        suite_accounts::Account {
+            id: self.id.clone(),
+            forge: suite_forge(self.forge).into(),
+            host: self.host.clone(),
+            username: self.username.clone(),
+            display_name: self.display_name.clone(),
+            orgs: self.orgs.clone(),
+            ..Default::default()
+        }
+    }
+
+    /// Un compte de la suite, toujours lu par jeton ; forge inconnue d'Owlery : `None`.
+    pub fn from_suite(a: &suite_accounts::Account) -> Option<Account> {
+        let forge = Forge::ALL.into_iter().find(|f| suite_forge(*f) == a.forge)?;
+        Some(Account {
+            id: a.id.clone(),
+            forge,
+            host: normalize_host(&a.host, forge),
+            orgs: a.orgs.clone(),
+            auth: Auth::Token,
+            username: a.username.clone(),
+            display_name: a.display_name.clone(),
+            unknown: BTreeMap::new(),
+        })
+    }
+}
+
+/// Range les comptes à jeton dans les comptes communs de la suite, sous leur identifiant (une connexion déjà
+/// connue de la suite garde le sien) ; ne restent dans Owlery que ses comptes `gh`. Rien n'est retiré tant
+/// que tous ne sont pas repris. Vrai si un compte a été repris.
+pub fn migrate_to_suite(
+    suite: &suite_accounts::Store,
+    store: &dyn SecretStore,
+    accounts: &mut Vec<Account>,
+) -> Result<bool, String> {
+    for a in accounts.iter().filter(|a| a.auth == Auth::Token) {
+        let token = store.get(&a.token_key())?;
+        suite.adopt(a.to_suite(), token)?;
+    }
+    let before = accounts.len();
+    accounts.retain(|a| a.auth != Auth::Token);
+    Ok(accounts.len() != before)
+}
+
 /// Nouvel identifiant de compte : 16 caractères hexadécimaux.
 pub fn new_account_id() -> String {
     use std::hash::{BuildHasher, Hasher};

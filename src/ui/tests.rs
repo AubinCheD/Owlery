@@ -2,6 +2,7 @@
 //! Les lectures tournent en arrière-plan : on fait avancer l'interface jusqu'à la condition attendue.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -11,7 +12,7 @@ use egui_kittest::kittest::Queryable;
 
 use crate::app::{AccountDraft, App, FawkesLink, StartOptions};
 use crate::demo::{self, DemoFetcher};
-use crate::forges::{Account, FetchError, Fetched, Fetcher, Identity, Seen};
+use crate::forges::{Account, Auth, FetchError, Fetched, Fetcher, Identity, Seen};
 use crate::model::{Comment, Forge, Item, Kind, Status, Target};
 use crate::secrets::{MemoryStore, SecretStore};
 use crate::state::{self, AppState, Loaded};
@@ -56,6 +57,13 @@ struct Setup {
     fetcher: Arc<dyn Fetcher>,
     fetch: bool,
     writable: bool,
+    /// Les comptes communs de la suite (`None` : Owlery sans eux, comme en démonstration).
+    suite: Option<suite_accounts::Store>,
+}
+
+/// Comptes communs dans un dossier de test, coffre en mémoire.
+fn suite_store(dir: &std::path::Path) -> suite_accounts::Store {
+    suite_accounts::Store::new(&dir.join("suite"), Arc::new(suite_accounts::MemoryVault::default()))
 }
 
 impl Setup {
@@ -71,6 +79,7 @@ impl Setup {
             fetcher: Arc::new(DemoFetcher),
             fetch: true,
             writable: true,
+            suite: None,
         }
     }
 
@@ -83,6 +92,7 @@ impl Setup {
             fetcher: Arc::new(DemoFetcher),
             fetch: false,
             writable: true,
+            suite: None,
         }
     }
 
@@ -91,6 +101,7 @@ impl Setup {
         opts.fawkes = self.fawkes;
         opts.fetch_on_start = self.fetch;
         opts.writable = self.writable;
+        opts.accounts = self.suite;
         let loaded = Loaded { state: self.state, problems: Vec::new(), writable: self.writable };
         let mut h = Harness::builder().with_size([1300.0, 850.0]).build_eframe(move |cc| App::new(cc, opts, loaded));
         h.step();
@@ -514,4 +525,136 @@ fn orphan_entries_leave_when_their_account_is_gone() {
     h.state_mut().refresh(&ctx);
     wait_until(&mut h, "lecture", |a| a.running.is_empty());
     assert!(h.state().st.inbox.items.values().all(|i| i.account != demo::GITLAB));
+}
+
+#[test]
+fn token_accounts_move_to_the_suite() {
+    let mut setup = Setup::empty("vers-la-suite");
+    let gitlab = Account {
+        username: "camille".into(),
+        ..Account::new(Forge::GitLab, "https://GitLab.contoso.test/", Vec::new(), Auth::Token)
+    };
+    setup.state.settings.accounts = vec![gitlab.clone()];
+    setup.store.set(&gitlab.token_key(), "glpat-fictif").unwrap();
+    let suite = suite_store(&setup.dir);
+    setup.suite = Some(suite.clone());
+    let h = setup.start();
+    assert!(h.state().st.settings.accounts.is_empty(), "plus rien dans l'état d'Owlery");
+    let list = suite.list();
+    assert_eq!(list.len(), 1);
+    assert_eq!((list[0].id.as_str(), list[0].host.as_str()), (gitlab.id.as_str(), "gitlab.contoso.test"));
+    assert_eq!(list[0].username, "camille");
+    assert_eq!(suite.token(&gitlab.id).unwrap().as_deref(), Some("glpat-fictif"));
+    assert!(h.state().accounts().iter().any(|a| a.id == gitlab.id && a.auth == Auth::Token));
+}
+
+#[test]
+fn gh_accounts_stay_in_owlery() {
+    let mut setup = Setup::empty("gh-reste");
+    let gh = Account::new(Forge::GitHub, "", Vec::new(), Auth::Gh);
+    setup.state.settings.accounts = vec![gh.clone()];
+    let suite = suite_store(&setup.dir);
+    setup.suite = Some(suite.clone());
+    let h = setup.start();
+    assert_eq!(h.state().st.settings.accounts, vec![gh]);
+    assert!(suite.list().is_empty());
+}
+
+#[test]
+fn an_account_added_elsewhere_appears() {
+    let mut setup = Setup::empty("ailleurs");
+    let suite = suite_store(&setup.dir);
+    setup.suite = Some(suite.clone());
+    let mut h = setup.start();
+    assert!(h.state().accounts().iter().all(|a| a.forge != Forge::AzureDevOps));
+    let azure = suite_accounts::Account {
+        id: "aaaaaaaaaaaaaaaa".into(),
+        forge: "azure".into(),
+        host: "dev.azure.com".into(),
+        username: "camille@contoso.test".into(),
+        orgs: vec!["contoso".into()],
+        ..Default::default()
+    };
+    suite.add(azure, "pat-fictif").unwrap();
+    h.state_mut().suite_check = None;
+    h.step();
+    assert!(h.state().accounts().iter().any(|a| a.id == "aaaaaaaaaaaaaaaa" && a.orgs == ["contoso"]));
+}
+
+#[test]
+fn adding_an_account_goes_to_the_suite() {
+    let mut setup = Setup::empty("ajout-suite");
+    let suite = suite_store(&setup.dir);
+    setup.suite = Some(suite.clone());
+    let own = setup.store.clone();
+    let mut h = setup.start();
+    h.state_mut().accounts_open = true;
+    h.state_mut().draft = Some(AccountDraft {
+        forge: Forge::GitLab,
+        host: "gitlab.contoso.test".into(),
+        orgs: String::new(),
+        token: " glpat-fictif ".into(),
+        use_gh: false,
+        checking: None,
+        error: None,
+    });
+    h.run_steps(4);
+    h.get_by_label("Vérifier et ajouter").click();
+    wait_until(&mut h, "compte ajouté", |a| !a.accounts().is_empty());
+    let list = suite.list();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].username, "camille");
+    assert_eq!(suite.token(&list[0].id).unwrap().as_deref(), Some("glpat-fictif"));
+    assert!(h.state().st.settings.accounts.is_empty());
+    assert_eq!(own.get(&format!("account:{}", list[0].id)).unwrap(), None, "rien dans le coffre d'Owlery");
+}
+
+#[test]
+fn hosted_accounts_buttons_call_the_link() {
+    let mut h = Setup::empty("integre").start();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c = calls.clone();
+    h.state_mut().set_hosted(true);
+    h.state_mut().set_accounts_link(Box::new(move || {
+        c.fetch_add(1, Ordering::SeqCst);
+    }));
+    h.get_by_label_contains("Ajouter un compte").click();
+    h.step();
+    h.step();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(!h.state().accounts_open, "la fenêtre Comptes d'Owlery ne s'ouvre pas");
+}
+
+#[test]
+fn hosted_settings_hide_the_theme() {
+    let mut h = Setup::empty("integre-reglages").start();
+    h.state_mut().settings_open = true;
+    h.run_steps(3);
+    assert!(h.query_by_label("Thème").is_some());
+    h.state_mut().set_hosted(true);
+    h.run_steps(3);
+    assert!(h.query_by_label("Thème").is_none(), "le thème vient de l'hôte");
+}
+
+#[test]
+fn an_unreadable_suite_file_removes_nothing() {
+    let mut setup = Setup::empty("illisible");
+    let suite = suite_store(&setup.dir);
+    let azure = suite_accounts::Account {
+        id: "aaaaaaaaaaaaaaaa".into(),
+        forge: "azure".into(),
+        host: "dev.azure.com".into(),
+        username: "camille@contoso.test".into(),
+        orgs: vec!["contoso".into()],
+        ..Default::default()
+    };
+    suite.add(azure, "pat-fictif").unwrap();
+    setup.suite = Some(suite.clone());
+    let mut h = setup.start();
+    assert!(h.state().accounts().iter().any(|a| a.id == "aaaaaaaaaaaaaaaa"));
+    std::fs::write(suite.dir().join("accounts.json"), "{ pas du json").unwrap();
+    h.state_mut().suite_check = None;
+    h.step();
+    assert!(h.state().accounts().iter().any(|a| a.id == "aaaaaaaaaaaaaaaa"), "la dernière liste lue reste");
+    assert!(h.state().problems.iter().any(|p| p.contains("illisible")), "{:?}", h.state().problems);
 }

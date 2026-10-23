@@ -71,6 +71,10 @@ fn main() -> eframe::Result {
     drop(incoming_tx);
 
     let store: Arc<dyn SecretStore> = owlery::secrets::store_for(demo);
+    // Les comptes de toute la suite EyrieSuite ; un dossier d'état à part (`OWLERY_DATA_DIR`) garde des comptes à part.
+    let accounts = (!demo).then(|| {
+        suite_accounts::Store::new(&suite_accounts::accounts_dir(scope), Arc::new(suite_accounts::OsVault::suite()))
+    });
     let fetcher: Arc<dyn Fetcher> = if demo {
         Arc::new(owlery::demo::DemoFetcher)
     } else {
@@ -107,6 +111,7 @@ fn main() -> eframe::Result {
         notifier,
         writable,
         fetch_on_start: true,
+        accounts,
     };
     eframe::run_native(
         "Owlery",

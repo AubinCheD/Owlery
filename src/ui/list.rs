@@ -189,7 +189,7 @@ fn empty_state(app: &mut App, ui: &mut egui::Ui) {
             ui.label("Owlery lit vos forges en lecture seule. Deux façons de commencer :");
             ui.add_space(8.0);
             if ui.button("👤 Ajouter un compte (GitHub, GitLab, Azure DevOps)").clicked() {
-                app.accounts_open = true;
+                app.open_accounts();
             }
             ui.add_space(4.0);
             ui.label("ou, pour GitHub :");
@@ -217,7 +217,7 @@ fn empty_state(app: &mut App, ui: &mut egui::Ui) {
                     app.refresh(&ctx);
                 }
                 if ui.button("👤 Comptes…").clicked() {
-                    app.accounts_open = true;
+                    app.open_accounts();
                 }
             });
         } else {

@@ -100,6 +100,8 @@ pub struct StartOptions {
     pub writable: bool,
     /// Lancer une lecture au démarrage.
     pub fetch_on_start: bool,
+    /// Les comptes communs de la suite EyrieSuite : `None` en démonstration et dans les tests.
+    pub accounts: Option<suite_accounts::Store>,
 }
 
 impl StartOptions {
@@ -117,9 +119,15 @@ impl StartOptions {
             notifier: Arc::new(NoNotifier),
             writable: true,
             fetch_on_start: false,
+            accounts: None,
         }
     }
 }
+
+/// Relecture des comptes de la suite (une autre application a pu les changer) : au plus toutes les 2 s.
+const SUITE_CHECK_EVERY: Duration = Duration::from_secs(2);
+/// Début du message d'un fichier des comptes illisible, dans les problèmes affichés.
+const SUITE_PROBLEM: &str = "Comptes de la suite : ";
 
 /// État de la dernière lecture d'un compte.
 #[derive(Debug, Clone, Default)]
@@ -219,7 +227,14 @@ pub struct App {
     window_known: bool,
     focused: bool,
     /// Embarqué par un hôte (voir `set_hosted`).
-    hosted: bool,
+    pub(crate) hosted: bool,
+    /// Les comptes communs de la suite (`StartOptions::accounts`) et leur dernière lecture.
+    suite: Option<suite_accounts::Store>,
+    suite_accounts: Vec<Account>,
+    suite_stamp: Option<std::time::SystemTime>,
+    pub(crate) suite_check: Option<Instant>,
+    /// Posé par l'hôte : les comptes se règlent chez lui (voir `set_accounts_link`).
+    accounts_link: Option<Box<dyn Fn()>>,
 }
 
 pub(crate) fn now() -> i64 {
@@ -232,6 +247,76 @@ impl App {
     /// suite). Faux par défaut : rien ne change pour l'exécutable autonome.
     pub fn set_hosted(&mut self, hosted: bool) {
         self.hosted = hosted;
+    }
+
+    /// Embarqué par un hôte qui règle les comptes de toute la suite (Eyrie) : « Comptes… » et « Ajouter un compte »
+    /// appellent `open` au lieu d'ouvrir la fenêtre Comptes d'Owlery.
+    pub fn set_accounts_link(&mut self, open: Box<dyn Fn()>) {
+        self.accounts_link = Some(open);
+    }
+
+    /// Ouvre les comptes : ceux de l'hôte s'il les règle, sinon la fenêtre d'Owlery.
+    pub(crate) fn open_accounts(&mut self) {
+        match &self.accounts_link {
+            Some(open) => open(),
+            None => self.accounts_open = true,
+        }
+    }
+
+    pub(crate) fn toggle_accounts(&mut self) {
+        match &self.accounts_link {
+            Some(open) => open(),
+            None => self.accounts_open = !self.accounts_open,
+        }
+    }
+
+    /// Relit les comptes de la suite.
+    /// Relit les comptes de la suite. Un fichier illisible n'est pas « aucun compte » : la dernière liste reste, la
+    /// date n'avance pas (il sera relu) et l'erreur s'affiche. Vrai si la liste a été lue.
+    pub(crate) fn load_suite(&mut self) -> bool {
+        let Some(suite) = &self.suite else { return false };
+        self.suite_check = Some(Instant::now() + SUITE_CHECK_EVERY);
+        // La date avant la liste : une écriture qui tombe entre les deux sera relue la fois suivante.
+        let stamp = suite.stamp();
+        let read = suite.try_list();
+        self.problems.retain(|p| !p.starts_with(SUITE_PROBLEM));
+        match read {
+            Ok(list) => {
+                self.suite_accounts = list.iter().filter_map(Account::from_suite).collect();
+                self.suite_stamp = stamp;
+                true
+            }
+            Err(e) => {
+                self.problems.push(format!("{SUITE_PROBLEM}{e}"));
+                false
+            }
+        }
+    }
+
+    /// Comptes ajoutés ou retirés par une autre application de la suite : les nouveaux sont lus, les entrées des
+    /// disparus retirées.
+    fn sync_suite(&mut self, ctx: &egui::Context) {
+        let Some(suite) = &self.suite else { return };
+        if self.suite_check.is_some_and(|t| Instant::now() < t) {
+            return;
+        }
+        self.suite_check = Some(Instant::now() + SUITE_CHECK_EVERY);
+        if suite.stamp() == self.suite_stamp {
+            return;
+        }
+        let before: BTreeSet<String> = self.suite_accounts.iter().map(|a| a.id.clone()).collect();
+        if !self.load_suite() {
+            return;
+        }
+        let after: BTreeSet<String> = self.suite_accounts.iter().map(|a| a.id.clone()).collect();
+        for gone in before.difference(&after) {
+            self.st.inbox.remove_account(gone);
+            self.status.remove(gone);
+            self.changed();
+        }
+        if after.difference(&before).next().is_some() {
+            self.refresh(ctx);
+        }
     }
 
     pub fn new(cc: &eframe::CreationContext<'_>, opts: StartOptions, loaded: state::Loaded) -> Self {
@@ -259,6 +344,13 @@ impl App {
                 }
                 Ok(false) => {}
                 Err(e) => problems.push(format!("Reprise du jeton GitHub du premier jet impossible : {e}")),
+            }
+            // Les comptes à jeton deviennent ceux de toute la suite (Eyrie, DragonTree).
+            if let Some(suite) = &opts.accounts {
+                match forges::migrate_to_suite(suite, opts.store.as_ref(), &mut st.settings.accounts) {
+                    Ok(moved) => dirty |= moved,
+                    Err(e) => problems.push(format!("Reprise des comptes dans la suite impossible : {e}")),
+                }
             }
         }
         if !opts.writable && !problems.iter().any(|p| p.contains("rien ne sera enregistré")) {
@@ -315,7 +407,13 @@ impl App {
             window_known: false,
             focused: true,
             hosted: false,
+            suite: opts.accounts,
+            suite_accounts: Vec::new(),
+            suite_stamp: None,
+            suite_check: None,
+            accounts_link: None,
         };
+        app.load_suite();
         apply_theme(&cc.egui_ctx, app.st.settings.theme);
         app.scan_repos();
         if opts.fetch_on_start {
@@ -342,9 +440,21 @@ impl App {
         &self.st.settings.rules
     }
 
-    /// Comptes lus : ceux des réglages, et « GitHub par gh » s'il n'y a pas de compte GitHub.
+    /// Comptes lus : ceux de la suite, ceux des réglages (`gh`), et « GitHub par gh » s'il n'y a pas de compte
+    /// GitHub.
     pub(crate) fn accounts(&self) -> Vec<Account> {
-        forges::accounts_to_read(&self.st.settings.accounts, self.gh_available)
+        let mut configured = self.st.settings.accounts.clone();
+        configured.extend(self.suite_accounts.iter().cloned());
+        forges::accounts_to_read(&configured, self.gh_available)
+    }
+
+    /// Le compte vient-il de la suite (et non des réglages d'Owlery) ?
+    pub(crate) fn is_suite_account(&self, id: &str) -> bool {
+        self.suite_accounts.iter().any(|a| a.id == id)
+    }
+
+    pub(crate) fn suite(&self) -> Option<&suite_accounts::Store> {
+        self.suite.as_ref()
     }
 
     pub(crate) fn account_of(&self, item: &Item) -> Option<Account> {
@@ -818,7 +928,7 @@ impl App {
             Command::Palette => {
                 self.palette = if self.palette.is_some() { None } else { Some((String::new(), 0)) };
             }
-            Command::Accounts => self.accounts_open = !self.accounts_open,
+            Command::Accounts => self.toggle_accounts(),
             Command::Settings => self.settings_open = !self.settings_open,
         }
     }
@@ -1017,6 +1127,7 @@ pub fn viewport(window: &WindowState) -> egui::ViewportBuilder {
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.learn_window(frame);
+        self.sync_suite(ctx);
         self.poll_fetches(ctx);
         self.poll_scan();
         self.poll_fawkes(ctx);

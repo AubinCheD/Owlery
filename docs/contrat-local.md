@@ -87,17 +87,16 @@ Aujourd'hui : `dragontree.exe <dossier>` (existe déjà). Souhaité ensuite, sur
 
 `branche` : la sélectionner dans l'historique, sans la récupérer ni changer de branche active.
 
-## 5. Comptes partagés avec DragonTree (plus tard)
+## 5. Comptes communs de la suite EyrieSuite (fait le 23/10/2026)
 
-Owlery ne lit **pas** le coffre de DragonTree : il peut contenir des jetons d'autres comptes, et Owlery n'a
-besoin que de lecture. Proposition pour la suite :
+Les comptes à jeton sont **communs à toute la suite** (Eyrie, DragonTree, Owlery), seuls ou intégrés : liste dans
+`%APPDATA%\EyrieSuite\accounts.json`, jetons dans le service « EyrieSuite » du Gestionnaire d'identifiants (l'ancien
+service « Owlery » est encore relu). Contrat complet : `../SuperApp/docs/comptes.md` (crate `suite-accounts`).
 
-- un service commun dans le Gestionnaire d'identifiants (« Suite », utilisateur `account:<id>`) pour les
-  comptes que l'utilisateur choisit de **partager**, compte par compte ;
-- la liste des comptes partagés (sans jeton) dans un fichier commun : `%APPDATA%\Suite\accounts.json` (`id`,
-  forge, hôte, organisations, nom, droits annoncés) ;
-- chaque application garde ses comptes privés dans son propre service (« Owlery », « DragonTree ») ;
-- dans la suite, l'hôte fournit la liste et le dialogue de compte ; les modules ne font que lire.
+- Choix fait : plus de partage compte par compte ; on se connecte une fois, pour toute la suite.
+- Les comptes `gh` (GitHub par la CLI, sans jeton) restent dans l'état d'Owlery.
+- Au premier lancement, les comptes à jeton de l'état d'Owlery passent dans ceux de la suite (même identifiant).
+- Dans Eyrie, « Comptes… » ouvre la page Comptes d'Eyrie (`App::set_accounts_link`) et le thème est celui d'Eyrie.
 
 ## 6. Patronus
 
