@@ -235,6 +235,8 @@ pub struct App {
     pub(crate) suite_check: Option<Instant>,
     /// Posé par l'hôte : les comptes se règlent chez lui (voir `set_accounts_link`).
     accounts_link: Option<Box<dyn Fn()>>,
+    /// Posé par l'hôte : les réglages s'ouvrent chez lui, sur la page d'Owlery (voir `set_settings_link`).
+    settings_link: Option<Box<dyn Fn()>>,
 }
 
 pub(crate) fn now() -> i64 {
@@ -253,6 +255,29 @@ impl App {
     /// appellent `open` au lieu d'ouvrir la fenêtre Comptes d'Owlery.
     pub fn set_accounts_link(&mut self, open: Box<dyn Fn()>) {
         self.accounts_link = Some(open);
+    }
+
+    /// Embarqué par un hôte qui montre les réglages d'Owlery dans les siens : « Réglages » appelle `open` (la page
+    /// Owlery des réglages de l'hôte) au lieu d'ouvrir sa fenêtre.
+    pub fn set_settings_link(&mut self, open: Box<dyn Fn()>) {
+        self.settings_link = Some(open);
+    }
+
+    /// Ses réglages, dessinés dans un `Ui` de l'hôte (la page Owlery de ses réglages).
+    pub fn settings_ui(&mut self, ui: &mut egui::Ui) {
+        crate::ui::settings::panel(self, ui);
+    }
+
+    /// Les réglages se dessinent chez l'hôte (lien posé).
+    pub(crate) fn settings_in_host(&self) -> bool {
+        self.settings_link.is_some()
+    }
+
+    pub(crate) fn toggle_settings(&mut self) {
+        match &self.settings_link {
+            Some(open) => open(),
+            None => self.settings_open = !self.settings_open,
+        }
     }
 
     /// Ouvre les comptes : ceux de l'hôte s'il les règle, sinon la fenêtre d'Owlery.
@@ -412,6 +437,7 @@ impl App {
             suite_stamp: None,
             suite_check: None,
             accounts_link: None,
+            settings_link: None,
         };
         app.load_suite();
         apply_theme(&cc.egui_ctx, app.st.settings.theme);
@@ -929,7 +955,7 @@ impl App {
                 self.palette = if self.palette.is_some() { None } else { Some((String::new(), 0)) };
             }
             Command::Accounts => self.toggle_accounts(),
-            Command::Settings => self.settings_open = !self.settings_open,
+            Command::Settings => self.toggle_settings(),
         }
     }
 

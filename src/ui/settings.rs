@@ -10,145 +10,182 @@ use crate::state::ThemeChoice;
 
 pub fn window(app: &mut App, ctx: &egui::Context) {
     if !app.settings_open {
-        app.capturing = None;
+        // Intégré, la saisie d'un raccourci se fait dans la page de l'hôte : elle n'est pas abandonnée ici.
+        if !app.settings_in_host() {
+            app.capturing = None;
+        }
         return;
     }
     capture_shortcut(app, ctx);
     let mut open = true;
-    let mut changed = false;
-    let mut rescan = false;
-    egui::Window::new("Réglages").open(&mut open).default_width(560.0).vscroll(true).show(ctx, |ui| {
-        // Embarqué, le thème est celui de l'hôte.
-        let hosted = app.hosted;
-        let s = &mut app.st.settings;
-        egui::Grid::new("settings").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
-            ui.label("Lecture périodique");
-            ui.horizontal(|ui| {
-                changed |= ui.add(egui::DragValue::new(&mut s.refresh_minutes).range(0..=240).suffix(" min")).changed();
-                ui.label(RichText::new("0 : seulement à la demande").weak());
-            });
-            ui.end_row();
-            if !hosted {
-                ui.label("Thème");
-                ui.horizontal(|ui| {
-                    for (t, label) in
-                        [(ThemeChoice::System, "Système"), (ThemeChoice::Dark, "Sombre"), (ThemeChoice::Light, "Clair")]
-                    {
-                        if ui.selectable_value(&mut s.theme, t, label).changed() {
-                            apply_theme(ui.ctx(), t);
-                            changed = true;
-                        }
-                    }
-                });
+    egui::Window::new("Réglages").open(&mut open).default_width(560.0).vscroll(true).show(ctx, |ui| contents(app, ui));
+    if !open {
+        app.settings_open = false;
+        app.capturing = None;
+    }
+}
+
+/// Les réglages d'Owlery dans la page qu'un hôte lui donne (Réglages d'Eyrie › Owlery) : les mêmes que dans sa
+/// fenêtre, puis l'état de lecture de chaque compte (les comptes se règlent chez l'hôte).
+pub(crate) fn panel(app: &mut App, ui: &mut egui::Ui) {
+    capture_shortcut(app, &ui.ctx().clone());
+    contents(app, ui);
+    if app.hosted {
+        ui.add_space(8.0);
+        ui.label(RichText::new("Comptes lus").strong());
+        let accounts = app.accounts();
+        if accounts.is_empty() {
+            ui.label(RichText::new("Aucun compte : ajoutez-en un dans les réglages d'Eyrie, page Comptes.").weak());
+        }
+        egui::Grid::new("panel-accounts").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
+            for a in &accounts {
+                ui.label(a.title());
+                let state = super::accounts::status_text(app, a, ui);
+                ui.add(egui::Label::new(state).truncate());
                 ui.end_row();
             }
         });
+    }
+}
 
-        ui.add_space(8.0);
-        ui.label(RichText::new("Notifications Windows").strong());
-        changed |= ui.checkbox(&mut s.notify, "Prévenir quand Owlery n'est pas au premier plan").changed();
-        ui.add_enabled_ui(s.notify, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                for k in Kind::ALL {
-                    let mut on = s.notify_kinds.contains(&k);
-                    if ui.checkbox(&mut on, k.label()).changed() {
-                        if on {
-                            s.notify_kinds.insert(k);
-                        } else {
-                            s.notify_kinds.remove(&k);
-                        }
+/// Le contenu des réglages : dans la fenêtre d'Owlery, ou dans la page d'un hôte (`panel`).
+fn contents(app: &mut App, ui: &mut egui::Ui) {
+    let mut changed = false;
+    let mut rescan = false;
+    // Embarqué, le thème est celui de l'hôte.
+    let hosted = app.hosted;
+    let s = &mut app.st.settings;
+    egui::Grid::new("settings").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+        ui.label("Lecture périodique");
+        ui.horizontal(|ui| {
+            changed |= ui.add(egui::DragValue::new(&mut s.refresh_minutes).range(0..=240).suffix(" min")).changed();
+            ui.label(RichText::new("0 : seulement à la demande").weak());
+        });
+        ui.end_row();
+        if !hosted {
+            ui.label("Thème");
+            ui.horizontal(|ui| {
+                for (t, label) in
+                    [(ThemeChoice::System, "Système"), (ThemeChoice::Dark, "Sombre"), (ThemeChoice::Light, "Clair")]
+                {
+                    if ui.selectable_value(&mut s.theme, t, label).changed() {
+                        apply_theme(ui.ctx(), t);
                         changed = true;
                     }
                 }
             });
-            ui.label(RichText::new("Rien au premier chargement d'un compte ; un rappel quand un report arrive à échéance.").weak());
+            ui.end_row();
+        }
+    });
+
+    ui.add_space(8.0);
+    ui.label(RichText::new("Notifications Windows").strong());
+    changed |= ui.checkbox(&mut s.notify, "Prévenir quand Owlery n'est pas au premier plan").changed();
+    ui.add_enabled_ui(s.notify, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            for k in Kind::ALL {
+                let mut on = s.notify_kinds.contains(&k);
+                if ui.checkbox(&mut on, k.label()).changed() {
+                    if on {
+                        s.notify_kinds.insert(k);
+                    } else {
+                        s.notify_kinds.remove(&k);
+                    }
+                    changed = true;
+                }
+            }
         });
+        ui.label(
+            RichText::new("Rien au premier chargement d'un compte ; un rappel quand un report arrive à échéance.")
+                .weak(),
+        );
+    });
 
-        ui.add_space(8.0);
-        ui.label(RichText::new("Tri").strong());
-        changed |= ui.checkbox(&mut s.rules.hide_bots, "Masquer les entrées des robots (dependabot[bot], renovate…)").changed();
-        if s.rules.muted_repos.is_empty() {
-            ui.label(RichText::new("Aucun dépôt ignoré (clic droit sur un dépôt dans la liste pour l'ignorer).").weak());
-        }
-        let mut unmute = None;
-        for repo in &s.rules.muted_repos {
-            ui.horizontal(|ui| {
-                ui.label(format!("Ignoré : {repo}"));
-                if ui.small_button("Rétablir").clicked() {
-                    unmute = Some(repo.clone());
-                }
-            });
-        }
-        if let Some(r) = unmute {
-            s.rules.muted_repos.remove(&r);
-            changed = true;
-        }
+    ui.add_space(8.0);
+    ui.label(RichText::new("Tri").strong());
+    changed |=
+        ui.checkbox(&mut s.rules.hide_bots, "Masquer les entrées des robots (dependabot[bot], renovate…)").changed();
+    if s.rules.muted_repos.is_empty() {
+        ui.label(RichText::new("Aucun dépôt ignoré (clic droit sur un dépôt dans la liste pour l'ignorer).").weak());
+    }
+    let mut unmute = None;
+    for repo in &s.rules.muted_repos {
+        ui.horizontal(|ui| {
+            ui.label(format!("Ignoré : {repo}"));
+            if ui.small_button("Rétablir").clicked() {
+                unmute = Some(repo.clone());
+            }
+        });
+    }
+    if let Some(r) = unmute {
+        s.rules.muted_repos.remove(&r);
+        changed = true;
+    }
 
-        ui.add_space(8.0);
-        ui.label(RichText::new("Dossiers des dépôts").strong());
-        ui.label(RichText::new("Owlery y cherche les dépôts (profondeur 3) pour DragonTree et Claude ; un dossier choisi à la main dans le détail l'emporte.").weak());
-        let mut remove_root = None;
-        for (i, root) in s.repo_roots.iter().enumerate() {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(root).monospace());
-                if ui.small_button("Retirer").clicked() {
-                    remove_root = Some(i);
-                }
-            });
-        }
-        if let Some(i) = remove_root {
-            s.repo_roots.remove(i);
+    ui.add_space(8.0);
+    ui.label(RichText::new("Dossiers des dépôts").strong());
+    ui.label(RichText::new("Owlery y cherche les dépôts (profondeur 3) pour DragonTree et Claude ; un dossier choisi à la main dans le détail l'emporte.").weak());
+    let mut remove_root = None;
+    for (i, root) in s.repo_roots.iter().enumerate() {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(root).monospace());
+            if ui.small_button("Retirer").clicked() {
+                remove_root = Some(i);
+            }
+        });
+    }
+    if let Some(i) = remove_root {
+        s.repo_roots.remove(i);
+        changed = true;
+        rescan = true;
+    }
+    ui.horizontal(|ui| {
+        if ui.button("Ajouter un dossier…").clicked()
+            && let Some(d) = rfd::FileDialog::new().set_title("Dossier où chercher les dépôts").pick_folder()
+        {
+            s.repo_roots.push(d.display().to_string());
             changed = true;
             rescan = true;
         }
-        ui.horizontal(|ui| {
-            if ui.button("Ajouter un dossier…").clicked()
-                && let Some(d) = rfd::FileDialog::new().set_title("Dossier où chercher les dépôts").pick_folder() {
-                    s.repo_roots.push(d.display().to_string());
-                    changed = true;
-                    rescan = true;
-                }
-            if ui.button("Parcourir maintenant").clicked() {
-                rescan = true;
-            }
-        });
-
-        ui.add_space(8.0);
-        ui.label(RichText::new("Programmes").strong());
-        egui::Grid::new("programs").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
-            for (label, path) in [("dragontree.exe", &mut s.dragontree_exe), ("fawkes.exe", &mut s.fawkes_exe)] {
-                ui.label(label);
-                ui.horizontal(|ui| {
-                    changed |= ui.add(egui::TextEdit::singleline(path).hint_text("cherché dans le PATH").desired_width(300.0)).changed();
-                    if ui.small_button("Choisir…").clicked()
-                        && let Some(p) = rfd::FileDialog::new().add_filter("Programme", &["exe"]).pick_file() {
-                            *path = p.display().to_string();
-                            changed = true;
-                        }
-                });
-                ui.end_row();
-            }
-        });
-
-        ui.add_space(8.0);
-        ui.collapsing("Raccourcis", |ui| shortcuts_grid(app, ui, &mut changed));
-        ui.add_space(8.0);
-        ui.label(RichText::new(format!("Dossier de l'état : {}", app.dir.display())).weak());
-        if app.scanning {
-            ui.label(RichText::new("Parcours des dossiers…").weak());
-        } else if !app.found_repos.is_empty() {
-            ui.label(RichText::new(format!("{} dépôt(s) trouvé(s) dans les dossiers", app.found_repos.len())).weak());
+        if ui.button("Parcourir maintenant").clicked() {
+            rescan = true;
         }
     });
+
+    ui.add_space(8.0);
+    ui.label(RichText::new("Programmes").strong());
+    egui::Grid::new("programs").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+        for (label, path) in [("dragontree.exe", &mut s.dragontree_exe), ("fawkes.exe", &mut s.fawkes_exe)] {
+            ui.label(label);
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .add(egui::TextEdit::singleline(path).hint_text("cherché dans le PATH").desired_width(300.0))
+                    .changed();
+                if ui.small_button("Choisir…").clicked()
+                    && let Some(p) = rfd::FileDialog::new().add_filter("Programme", &["exe"]).pick_file()
+                {
+                    *path = p.display().to_string();
+                    changed = true;
+                }
+            });
+            ui.end_row();
+        }
+    });
+
+    ui.add_space(8.0);
+    ui.collapsing("Raccourcis", |ui| shortcuts_grid(app, ui, &mut changed));
+    ui.add_space(8.0);
+    ui.label(RichText::new(format!("Dossier de l'état : {}", app.dir.display())).weak());
+    if app.scanning {
+        ui.label(RichText::new("Parcours des dossiers…").weak());
+    } else if !app.found_repos.is_empty() {
+        ui.label(RichText::new(format!("{} dépôt(s) trouvé(s) dans les dossiers", app.found_repos.len())).weak());
+    }
     if changed {
         app.changed();
     }
     if rescan {
         app.scan_repos();
-    }
-    if !open {
-        app.settings_open = false;
-        app.capturing = None;
     }
 }
 

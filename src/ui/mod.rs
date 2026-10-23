@@ -102,7 +102,7 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
         // Les boutons de droite d'abord : le message d'état prend la place qui reste, tronqué.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button("⚙ Réglages").on_hover_text(app.shortcuts.label(Command::Settings)).clicked() {
-                app.settings_open = !app.settings_open;
+                app.toggle_settings();
             }
             if ui.button("👤 Comptes…").clicked() {
                 app.toggle_accounts();

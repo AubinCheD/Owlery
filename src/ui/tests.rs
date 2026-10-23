@@ -658,3 +658,45 @@ fn an_unreadable_suite_file_removes_nothing() {
     assert!(h.state().accounts().iter().any(|a| a.id == "aaaaaaaaaaaaaaaa"), "la dernière liste lue reste");
     assert!(h.state().problems.iter().any(|p| p.contains("illisible")), "{:?}", h.state().problems);
 }
+
+/// Un hôte minimal : il dessine les réglages d'Owlery dans son propre `Ui` (la page Owlery des réglages d'Eyrie).
+struct PanelHost(App);
+
+impl eframe::App for PanelHost {
+    fn ui(&mut self, ui: &mut eframe::egui::Ui, _frame: &mut eframe::Frame) {
+        self.0.settings_ui(ui);
+    }
+}
+
+#[test]
+fn settings_panel_draws_in_a_host_ui() {
+    let setup = Setup::demo("panneau");
+    let mut opts = StartOptions::for_tests(setup.dir, setup.store, setup.fetcher);
+    opts.fetch_on_start = false;
+    let loaded = Loaded { state: setup.state, problems: Vec::new(), writable: true };
+    let mut h = Harness::builder().with_size([900.0, 900.0]).build_eframe(move |cc| {
+        let mut app = App::new(cc, opts, loaded);
+        app.set_hosted(true);
+        PanelHost(app)
+    });
+    h.run_steps(3);
+    assert!(h.query_by_label("Lecture périodique").is_some(), "les réglages d'Owlery");
+    assert!(h.query_by_label("Thème").is_none(), "le thème vient de l'hôte");
+    assert!(h.query_by_label_contains("GitLab").is_some(), "l'état de lecture de chaque compte");
+}
+
+#[test]
+fn hosted_settings_button_opens_the_host_settings() {
+    let mut h = Setup::empty("reglages-hote").start();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c = calls.clone();
+    h.state_mut().set_hosted(true);
+    h.state_mut().set_settings_link(Box::new(move || {
+        c.fetch_add(1, Ordering::SeqCst);
+    }));
+    h.get_by_label_contains("Réglages").click();
+    h.step();
+    h.step();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(!h.state().settings_open, "la fenêtre Réglages d'Owlery ne s'ouvre pas");
+}

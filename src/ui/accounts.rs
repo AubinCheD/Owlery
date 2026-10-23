@@ -38,6 +38,18 @@ pub fn token_help(forge: Forge, host: &str, orgs: &str) -> (&'static str, String
     }
 }
 
+/// État de la dernière lecture d'un compte : en cours, erreur, heure, ou pas encore lu.
+pub(crate) fn status_text(app: &App, a: &Account, ui: &egui::Ui) -> RichText {
+    match app.status.get(&a.id) {
+        _ if app.running.contains(&a.id) => RichText::new("lecture…").weak(),
+        Some(s) if s.error.is_some() => {
+            RichText::new(s.error.as_ref().map(|e| e.to_string()).unwrap_or_default()).color(ui.visuals().warn_fg_color)
+        }
+        Some(s) if s.last_ok.is_some() => RichText::new(format!("lu à {}", super::date(s.last_ok.unwrap_or(0)))).weak(),
+        _ => RichText::new("pas encore lu").weak(),
+    }
+}
+
 pub fn window(app: &mut App, ctx: &egui::Context) {
     poll_check(app, ctx);
     if !app.accounts_open {
@@ -54,17 +66,7 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
             for a in &accounts {
                 ui.label(RichText::new(a.title()).strong());
                 let s = app.status.get(&a.id);
-                let state = match s {
-                    _ if app.running.contains(&a.id) => RichText::new("lecture…").weak(),
-                    Some(s) if s.error.is_some() => {
-                        RichText::new(s.error.as_ref().map(|e| e.to_string()).unwrap_or_default())
-                            .color(ui.visuals().warn_fg_color)
-                    }
-                    Some(s) if s.last_ok.is_some() => {
-                        RichText::new(format!("lu à {}", super::date(s.last_ok.unwrap_or(0)))).weak()
-                    }
-                    _ => RichText::new("pas encore lu").weak(),
-                };
+                let state = status_text(app, a, ui);
                 let resp = ui.add(egui::Label::new(state).truncate());
                 if let Some(notes) = s.map(|s| s.notes.join("\n")).filter(|n| !n.is_empty()) {
                     resp.on_hover_text(notes);
