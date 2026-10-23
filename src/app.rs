@@ -268,6 +268,11 @@ impl App {
         crate::ui::settings::panel(self, ui);
     }
 
+    /// Sa page chez l'hôte quittée (fenêtre fermée, autre page) : un raccourci en cours de saisie est abandonné.
+    pub fn settings_left(&mut self) {
+        self.capturing = None;
+    }
+
     /// Les réglages se dessinent chez l'hôte (lien posé).
     pub(crate) fn settings_in_host(&self) -> bool {
         self.settings_link.is_some()
