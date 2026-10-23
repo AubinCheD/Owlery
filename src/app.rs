@@ -218,6 +218,8 @@ pub struct App {
     title_shown: Option<usize>,
     window_known: bool,
     focused: bool,
+    /// Embarqué par un hôte (voir `set_hosted`).
+    hosted: bool,
 }
 
 pub(crate) fn now() -> i64 {
@@ -225,6 +227,13 @@ pub(crate) fn now() -> i64 {
 }
 
 impl App {
+    /// Embarqué par un hôte (la suite) : la fenêtre n'est pas la sienne. Sa taille et sa position ne
+    /// sont pas enregistrées dans l'état (sinon, lancé seul ensuite, il s'ouvrirait à la taille de la
+    /// suite). Faux par défaut : rien ne change pour l'exécutable autonome.
+    pub fn set_hosted(&mut self, hosted: bool) {
+        self.hosted = hosted;
+    }
+
     pub fn new(cc: &eframe::CreationContext<'_>, opts: StartOptions, loaded: state::Loaded) -> Self {
         let (fetch_tx, fetch_rx) = channel();
         let mut st = loaded.state;
@@ -305,6 +314,7 @@ impl App {
             title_shown: None,
             window_known: false,
             focused: true,
+            hosted: false,
         };
         apply_theme(&cc.egui_ctx, app.st.settings.theme);
         app.scan_repos();
@@ -915,7 +925,7 @@ impl App {
             }
             self.focused = f;
         }
-        if minimized {
+        if minimized || self.hosted {
             return;
         }
         let mut w = self.st.window.clone();
