@@ -91,7 +91,7 @@ Aujourd'hui : `dragontree.exe <dossier>` (existe déjà). Souhaité ensuite, sur
 
 Les comptes à jeton sont **communs à toute la suite** (Eyrie, DragonTree, Owlery), seuls ou intégrés : liste dans
 `%APPDATA%\EyrieSuite\accounts.json`, jetons dans le service « EyrieSuite » du Gestionnaire d'identifiants (l'ancien
-service « Owlery » est encore relu). Contrat complet : `../SuperApp/docs/comptes.md` (crate `suite-accounts`).
+service « Owlery » est encore relu). Contrat complet : `../Eyrie/docs/comptes.md` (crate `suite-accounts`).
 
 - Choix fait : plus de partage compte par compte ; on se connecte une fois, pour toute la suite.
 - Les comptes `gh` (GitHub par la CLI, sans jeton) restent dans l'état d'Owlery.

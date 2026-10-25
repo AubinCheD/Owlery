@@ -28,7 +28,7 @@ rfd = "0.17"
 base64 = "0.23"
 raw-window-handle = "0.6"
 # Comptes communs de la suite EyrieSuite (dépôt voisin, voir `docs/contrat-local.md` §5).
-suite-accounts = { path = "../SuperApp/crates/suite-accounts" }
+suite-accounts = { path = "../Eyrie/crates/suite-accounts" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
