@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Color32, RichText};
 
 use crate::app::{App, now};
+use crate::forges::Account;
 use crate::inbox::GroupBy;
 use crate::model::{Ci, Forge, Kind, Status};
 use crate::shortcuts::Command;
@@ -133,6 +134,13 @@ fn toolbar(app: &mut App, ui: &mut egui::Ui) {
 fn filters(app: &mut App, ui: &mut egui::Ui) {
     let before = app.st.view.clone();
     let group_before = app.st.settings.group_by;
+    // Le filtre par compte, à partir de deux comptes. Un compte retiré (ou un seul restant) ne filtre plus : sauf si
+    // les comptes de la suite n'ont pas pu être lus, la liste pouvant alors en manquer.
+    let accounts = app.accounts();
+    let unknown = app.st.view.account.as_ref().is_some_and(|id| !accounts.iter().any(|a| &a.id == id));
+    if app.accounts_known() && (accounts.len() < 2 || unknown) {
+        app.st.view.account = None;
+    }
     ui.horizontal_wrapped(|ui| {
         let view = &mut app.st.view;
         let search = ui.add(
@@ -165,6 +173,19 @@ fn filters(app: &mut App, ui: &mut egui::Ui) {
             });
         // Nom lu par les lecteurs d'écran : la liste n'a pas de libellé visible.
         forge.response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Forge"));
+        if accounts.len() >= 2 || view.account.is_some() {
+            let current = match &view.account {
+                None => "Tous les comptes".to_string(),
+                Some(id) => accounts.iter().find(|a| &a.id == id).map_or_else(|| id.clone(), Account::title),
+            };
+            let account = egui::ComboBox::from_id_salt("account").selected_text(current).show_ui(ui, |ui| {
+                ui.selectable_value(&mut view.account, None, "Tous les comptes");
+                for a in &accounts {
+                    ui.selectable_value(&mut view.account, Some(a.id.clone()), a.title());
+                }
+            });
+            account.response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Compte"));
+        }
         ui.checkbox(&mut view.waiting_only, "Seulement ce qui m'attend");
         ui.checkbox(&mut view.show_hidden, "Terminés et reportés");
         ui.separator();

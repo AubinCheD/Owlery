@@ -127,6 +127,16 @@ fn id_of(app: &App, number: u64) -> String {
     app.st.inbox.items.values().find(|i| i.number == Some(number)).unwrap().id.clone()
 }
 
+/// Sélectionne l'entrée et attend ses commentaires : lus en arrière-plan, ils allongent le détail et déplacent
+/// les boutons du bas ; un clic donné avant leur arrivée tomberait à côté.
+fn select_settled(h: &mut Harness<'static, App>, number: u64) {
+    let id = id_of(h.state(), number);
+    h.state_mut().select(Some(id.clone()));
+    wait_until(h, "commentaires lus", |a| {
+        a.comments.get(&id).is_some_and(|(_, s)| !matches!(s, crate::app::CommentsState::Loading))
+    });
+}
+
 #[test]
 fn no_account_shows_the_welcome_and_opens_accounts() {
     let mut h = Setup::empty("accueil").start();
@@ -246,9 +256,7 @@ fn fawkes_absent_opens_the_dialog_and_copy_closes_it() {
     setup.state.settings.repo_dirs.insert("contoso/api".into(), setup.dir.display().to_string());
     let mut h = setup.start();
     loaded(&mut h);
-    let id = id_of(h.state(), 138);
-    h.state_mut().select(Some(id));
-    h.step();
+    select_settled(&mut h, 138);
     h.get_by_label("✨ Corriger avec Claude").click();
     h.step();
     h.step();
@@ -268,9 +276,7 @@ fn fawkes_present_receives_the_request() {
     let fawkes = setup.fawkes.clone();
     let mut h = setup.start();
     loaded(&mut h);
-    let id = id_of(h.state(), 138);
-    h.state_mut().select(Some(id));
-    h.step();
+    select_settled(&mut h, 138);
     h.get_by_label("✨ Corriger avec Claude").click();
     wait_until(&mut h, "réponse de Fawkes", |a| {
         a.fawkes_job.is_none() && a.toasts.iter().any(|(t, _)| t.contains("Fawkes"))
@@ -310,6 +316,45 @@ fn the_snapshot_counts_reviews_by_repository() {
     assert_eq!(snap.waiting, 6);
     assert_eq!(snap.reviews_by_repo.get("github.com/contoso/api"), Some(&1));
     assert_eq!(snap.reviews_by_repo.get("dev.azure.com/fabrikam/ventes web/api"), Some(&1));
+}
+
+/// Les comptes des entrées affichées, d'après l'état de l'application.
+fn shown(app: &App) -> Vec<String> {
+    let view = app.st.inbox.view(&app.st.view, app.rules(), app.st.settings.group_by, crate::app::now());
+    view.iter().flat_map(|g| g.entries.iter().map(|(i, _)| i.account.clone())).collect()
+}
+
+#[test]
+fn the_account_filter_shows_one_account_and_is_kept() {
+    let setup = Setup::demo("filtre-compte");
+    let dir = setup.dir.clone();
+    let mut h = setup.start();
+    loaded(&mut h);
+    assert!(shown(h.state()).iter().any(|a| a != demo::GITLAB), "au départ, tous les comptes");
+    h.get_by_label("Compte").click();
+    h.run_steps(3);
+    let gitlab = demo::accounts().into_iter().find(|a| a.id == demo::GITLAB).unwrap().title();
+    h.get_by_label(&gitlab).click();
+    h.step();
+    h.step();
+    assert_eq!(h.state().st.view.account.as_deref(), Some(demo::GITLAB));
+    let accounts = shown(h.state());
+    assert!(!accounts.is_empty() && accounts.iter().all(|a| a == demo::GITLAB), "{accounts:?}");
+    wait_until(&mut h, "état enregistré", App::is_saved);
+    drop(h);
+    assert_eq!(state::load(&dir).state.view.account.as_deref(), Some(demo::GITLAB), "gardé au redémarrage");
+}
+
+#[test]
+fn the_account_filter_needs_two_accounts() {
+    let mut setup = Setup::demo("un-compte");
+    setup.state.settings.accounts.truncate(1);
+    // Un choix d'avant, quand il y avait plusieurs comptes : il ne filtre plus rien.
+    setup.state.view.account = Some(demo::GITLAB.into());
+    let mut h = setup.start();
+    h.step();
+    assert!(h.query_by_label("Compte").is_none(), "un seul compte : pas de liste");
+    assert_eq!(h.state().st.view.account, None);
 }
 
 #[test]
@@ -469,9 +514,7 @@ fn fawkes_error_is_shown_and_the_context_copied() {
     });
     let mut h = setup.start();
     loaded(&mut h);
-    let id = id_of(h.state(), 138);
-    h.state_mut().select(Some(id));
-    h.step();
+    select_settled(&mut h, 138);
     h.get_by_label("✨ Corriger avec Claude").click();
     wait_until(&mut h, "réponse de Fawkes", |a| a.fawkes_job.is_none() && !a.toasts.is_empty());
     assert!(h.state().toasts.iter().any(|(t, _)| t.contains("branche inconnue") && t.contains("Contexte copié")));

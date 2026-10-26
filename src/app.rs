@@ -479,6 +479,12 @@ impl App {
         forges::accounts_to_read(&configured, self.gh_available)
     }
 
+    /// La liste des comptes est-elle sûre ? Faux quand les comptes de la suite n'ont pas pu être lus : la liste
+    /// peut alors en manquer.
+    pub(crate) fn accounts_known(&self) -> bool {
+        !self.problems.iter().any(|p| p.starts_with(SUITE_PROBLEM))
+    }
+
     /// Le compte vient-il de la suite (et non des réglages d'Owlery) ?
     pub(crate) fn is_suite_account(&self, id: &str) -> bool {
         self.suite_accounts.iter().any(|a| a.id == id)

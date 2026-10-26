@@ -48,6 +48,8 @@ pub struct Filter {
     /// Types affichés (vide : tous).
     pub kinds: BTreeSet<Kind>,
     pub forge: Option<Forge>,
+    /// Compte d'où viennent les entrées affichées (aucun : tous les comptes).
+    pub account: Option<String>,
     /// Texte cherché dans le dépôt, le titre et l'auteur (sans tenir compte de la casse).
     #[serde(skip)]
     pub text: String,
@@ -343,6 +345,8 @@ fn passes(filter: &Filter, needle: &str, item: &Item, status: Status) -> bool {
         || (filter.waiting_only && status != Status::Unread)
         || (!filter.kinds.is_empty() && !filter.kinds.contains(&item.kind))
         || filter.forge.is_some_and(|f| f != item.forge)
+        // Une entrée d'avant les comptes (sans compte) reste visible : la prochaine lecture lui en donne un.
+        || filter.account.as_ref().is_some_and(|a| !item.account.is_empty() && &item.account != a)
         || (!needle.is_empty()
             && !item.repo.to_lowercase().contains(needle)
             && !item.title.to_lowercase().contains(needle)
@@ -438,6 +442,22 @@ mod tests {
         assert_eq!(inbox.view(&f, &rules, GroupBy::Kind, 1000)[0].title, "CI en échec");
         let f = Filter { forge: Some(Forge::GitLab), ..Filter::default() };
         assert!(inbox.view(&f, &rules, GroupBy::Repo, 1000).is_empty());
+    }
+
+    /// Deux comptes de la même forge : le filtre par compte les sépare, là où celui des forges ne peut pas.
+    #[test]
+    fn the_account_filter_keeps_one_account() {
+        let mut inbox = sample();
+        let pro = Item { account: "b".into(), ..item("northwind/app", 9, Kind::Mention, 400) };
+        inbox.merge("b", Forge::GitHub, vec![pro], 1000);
+        let only = |account: &str| Filter { account: Some(account.into()), ..Filter::default() };
+        assert_eq!(count(&inbox, &Filter::default(), 1000), 4);
+        assert_eq!(count(&inbox, &only("a"), 1000), 3);
+        assert_eq!(count(&inbox, &only("b"), 1000), 1);
+        // Une entrée d'avant les comptes reste visible, quel que soit le compte choisi.
+        let old = Item { account: String::new(), ..item("contoso/old", 4, Kind::Mention, 50) };
+        inbox.items.insert(old.id.clone(), old);
+        assert_eq!(count(&inbox, &only("b"), 1000), 2);
     }
 
     #[test]
