@@ -26,7 +26,9 @@ use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeServerProcessId, PIPE_READMODE_BYTE,
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT, WaitNamedPipeW,
 };
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use windows_sys::Win32::System::Threading::{
+    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
 
 use crate::contract::MAX_LINE;
@@ -37,9 +39,32 @@ fn wide(s: &str) -> Vec<u16> {
 
 /// SID de l'utilisateur courant (`S-1-5-21-…`).
 pub fn current_user_sid() -> Option<String> {
+    // SAFETY : pseudo-handle du processus courant, toujours valide.
+    unsafe { process_user_sid(GetCurrentProcess()) }
+}
+
+/// SID du compte du processus `pid`, s'il est lisible (un processus d'un autre compte ne l'est pas).
+fn pid_user_sid(pid: u32) -> Option<String> {
+    // SAFETY : handle fermé avant de sortir.
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            return None;
+        }
+        let sid = process_user_sid(process);
+        CloseHandle(process);
+        sid
+    }
+}
+
+/// SID du compte du processus ouvert `process`.
+///
+/// # Safety
+/// `process` est un handle valide, ouvert au moins en `PROCESS_QUERY_LIMITED_INFORMATION`.
+unsafe fn process_user_sid(process: HANDLE) -> Option<String> {
     unsafe {
         let mut token: HANDLE = std::ptr::null_mut();
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+        if OpenProcessToken(process, TOKEN_QUERY, &mut token) == 0 {
             return None;
         }
         let mut len = 0u32;
@@ -104,9 +129,13 @@ pub fn request(name: &str, line: &str, timeout: Duration) -> Result<String, Pipe
 }
 
 fn request_blocking(name: &str, line: &str) -> Result<String, PipeError> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::SECURITY_IDENTIFICATION;
     let mut file = None;
     for _ in 0..3 {
-        match std::fs::OpenOptions::new().read(true).write(true).open(name) {
+        // Le serveur peut savoir qui se connecte, pas agir au nom de l'utilisateur (usurpation d'identité).
+        match std::fs::OpenOptions::new().read(true).write(true).security_qos_flags(SECURITY_IDENTIFICATION).open(name)
+        {
             Ok(f) => {
                 file = Some(f);
                 break;
@@ -120,12 +149,17 @@ fn request_blocking(name: &str, line: &str) -> Result<String, PipeError> {
         }
     }
     let mut file = file.ok_or(PipeError::Timeout)?;
-    unsafe {
-        let mut pid = 0u32;
-        if GetNamedPipeServerProcessId(file.as_raw_handle() as HANDLE, &mut pid) != 0 {
-            AllowSetForegroundWindow(pid);
-        }
+    // Le nom du canal est prévisible : rien n'est envoyé à un serveur d'un autre compte qui l'aurait créé avant
+    // l'application visée (le titre, le dossier et le contexte d'une PR privée partiraient chez lui).
+    let mut pid = 0u32;
+    // SAFETY : handle de canal ouvert ci-dessus.
+    if unsafe { GetNamedPipeServerProcessId(file.as_raw_handle() as HANDLE, &mut pid) } == 0 {
+        return Err(PipeError::Io("serveur du canal introuvable".into()));
     }
+    if pid_user_sid(pid).is_none_or(|sid| Some(sid) != current_user_sid()) {
+        return Err(PipeError::Io("le canal est tenu par un autre compte : rien n'a été envoyé".into()));
+    }
+    unsafe { AllowSetForegroundWindow(pid) };
     let mut msg = line.trim_end().to_string();
     msg.push('\n');
     file.write_all(msg.as_bytes()).map_err(|e| PipeError::Io(e.to_string()))?;
@@ -251,6 +285,13 @@ mod tests {
     #[test]
     fn the_user_sid_is_found() {
         assert!(current_user_sid().is_some_and(|s| s.starts_with("S-1-")));
+    }
+
+    /// Le compte du processus qui tient un canal : le nôtre pour ce processus, jamais pour celui du système.
+    #[test]
+    fn the_owner_of_a_process_is_compared_to_the_user() {
+        assert_eq!(pid_user_sid(std::process::id()), current_user_sid());
+        assert_ne!(pid_user_sid(4), current_user_sid(), "processus System");
     }
 
     #[test]
