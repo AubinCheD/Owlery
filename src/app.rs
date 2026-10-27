@@ -273,6 +273,39 @@ impl App {
         self.capturing = None;
     }
 
+    // --- Pour la suite (le téléphone) : la boîte en direct, et les mêmes gestes que dans la liste ---
+
+    /// L'état en direct : les entrées, leurs marques, les règles (dépôts ignorés).
+    pub fn state(&self) -> &AppState {
+        &self.st
+    }
+
+    /// Change l'état d'une entrée (lue, non lue, traitée, reportée), annulable comme un clic.
+    pub fn mark(&mut self, id: &str, status: Status) {
+        self.set_status(id, status);
+    }
+
+    /// Ignore les entrées d'un dépôt (rétabli dans les réglages).
+    pub fn mute(&mut self, repo: &str) {
+        self.mute_repo(repo);
+    }
+
+    /// Défait le dernier changement d'état.
+    pub fn undo(&mut self) {
+        self.undo_last();
+    }
+
+    /// *Corriger avec Claude* : une session Claude dans Fawkes, dans le dossier local du dépôt, consigne collée.
+    /// Le message (dossier inconnu, Fawkes absent…) passe par la bulle d'Owlery, comme depuis la liste.
+    pub fn work_with_claude(&mut self, ctx: &egui::Context, id: &str) {
+        self.fix_with_claude(ctx, id);
+    }
+
+    /// Le dossier local du dépôt de cette entrée est connu (sinon *Corriger avec Claude* le demande d'abord).
+    pub fn knows_local_dir(&self, id: &str) -> bool {
+        self.st.inbox.items.get(id).is_some_and(|i| self.local_dir(i).is_some())
+    }
+
     /// Les réglages se dessinent chez l'hôte (lien posé).
     pub(crate) fn settings_in_host(&self) -> bool {
         self.settings_link.is_some()
