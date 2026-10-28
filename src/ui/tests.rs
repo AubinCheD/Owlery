@@ -191,6 +191,24 @@ fn mark_all_read_then_undo() {
     assert_eq!(waiting(h.state()), 6);
 }
 
+/// La suite (le téléphone) marque tout un groupe lu comme l'en-tête de la liste : celles qui ne l'étaient pas, en un
+/// seul geste qu'une seule annulation défait.
+#[test]
+fn the_suite_marks_many_read_in_one_undoable_gesture() {
+    let mut h = Setup::demo("suite-tout-lu").start();
+    loaded(&mut h);
+    let waiting = |a: &App| a.st.inbox.waiting(&a.st.settings.rules, crate::app::now());
+    let ids: Vec<String> = h.state().st.inbox.items.keys().cloned().collect();
+    assert_eq!(h.state_mut().mark_read_many(ids.clone()), 6, "« Ma PR » arrive lue");
+    assert_eq!(waiting(h.state()), 0);
+    assert_eq!(h.state_mut().mark_read_many(ids), 0, "plus rien à marquer");
+    h.state_mut().undo();
+    assert_eq!(waiting(h.state()), 6);
+    h.state_mut().undo();
+    let toasts: Vec<String> = h.state().toasts.iter().map(|(t, _)| t.clone()).collect();
+    assert_eq!(toasts.last().map(String::as_str), Some("Rien à annuler"), "{toasts:?}");
+}
+
 #[test]
 fn muted_repositories_and_bots_leave_the_list_and_the_count() {
     let mut h = Setup::demo("ignorer").start();

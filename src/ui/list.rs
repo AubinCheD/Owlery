@@ -77,7 +77,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             Action::Select(id) => app.selected = Some(id),
             Action::Open(id) => app.open(&id),
             Action::Status(id, s) => app.set_status(&id, s),
-            Action::MarkRead(ids) => app.mark_read(ids),
+            Action::MarkRead(ids) => {
+                app.mark_read(ids);
+            }
             Action::Mute(repo) => app.mute_repo(&repo),
         }
     }

@@ -285,6 +285,12 @@ impl App {
         self.set_status(id, status);
     }
 
+    /// Marque lues celles de ces entrées qui ne le sont pas, comme « Tout marquer lu » dans l'en-tête de la liste : un
+    /// seul geste à annuler, la même bulle. Rend leur nombre (0 : rien à marquer).
+    pub fn mark_read_many(&mut self, ids: Vec<String>) -> usize {
+        self.mark_read(ids)
+    }
+
     /// Ignore les entrées d'un dépôt (rétabli dans les réglages).
     pub fn mute(&mut self, repo: &str) {
         self.mute_repo(repo);
@@ -908,14 +914,14 @@ impl App {
         self.toast(if n == 1 { "Annulé".to_string() } else { format!("Annulé ({n} entrées)") });
     }
 
-    /// Marque lues les entrées non lues de la liste affichée (ou d'un groupe).
-    pub(crate) fn mark_read(&mut self, ids: Vec<String>) {
+    /// Marque lues les entrées non lues de la liste affichée (ou d'un groupe) ; rend leur nombre.
+    pub(crate) fn mark_read(&mut self, ids: Vec<String>) -> usize {
         let unread: Vec<String> = ids
             .into_iter()
             .filter(|id| self.st.inbox.items.get(id).is_some_and(|i| self.st.inbox.status(i, now()) == Status::Unread))
             .collect();
         if unread.is_empty() {
-            return;
+            return 0;
         }
         let n = unread.len();
         self.set_status_many(&unread, Status::Read, None);
@@ -923,6 +929,7 @@ impl App {
             let undo = self.shortcuts.label(Command::Undo);
             self.toast(format!("{n} entrées marquées lues ({undo} pour annuler)"));
         }
+        n
     }
 
     pub(crate) fn open(&mut self, id: &str) {
