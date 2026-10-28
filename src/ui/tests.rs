@@ -199,11 +199,14 @@ fn the_suite_marks_many_read_in_one_undoable_gesture() {
     loaded(&mut h);
     let waiting = |a: &App| a.st.inbox.waiting(&a.st.settings.rules, crate::app::now());
     let ids: Vec<String> = h.state().st.inbox.items.keys().cloned().collect();
+    assert!(!h.state().can_undo());
     assert_eq!(h.state_mut().mark_read_many(ids.clone()), 6, "« Ma PR » arrive lue");
     assert_eq!(waiting(h.state()), 0);
+    assert!(h.state().can_undo());
     assert_eq!(h.state_mut().mark_read_many(ids), 0, "plus rien à marquer");
     h.state_mut().undo();
     assert_eq!(waiting(h.state()), 6);
+    assert!(!h.state().can_undo(), "un seul geste");
     h.state_mut().undo();
     let toasts: Vec<String> = h.state().toasts.iter().map(|(t, _)| t.clone()).collect();
     assert_eq!(toasts.last().map(String::as_str), Some("Rien à annuler"), "{toasts:?}");

@@ -301,6 +301,11 @@ impl App {
         self.undo_last();
     }
 
+    /// Il reste un changement d'état à défaire (sinon `undo` répond « Rien à annuler »).
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
     /// *Corriger avec Claude* : une session Claude dans Fawkes, dans le dossier local du dépôt, consigne collée.
     /// Le message (dossier inconnu, Fawkes absent…) passe par la bulle d'Owlery, comme depuis la liste.
     pub fn work_with_claude(&mut self, ctx: &egui::Context, id: &str) {
